@@ -12,10 +12,10 @@ Delta Chat выбран как транспорт вместо, например
 площадки, которая может быть недоступна в отдельных сетях/регионах без
 дополнительного туннелирования.
 
-> Статус: ядро моста (демон + CLI) реализовано и проверено вживую —
-> создание сессионного чата, отправка, приём текста и голосовых. Skill
-> `/delta-standby` (arm/disarm внутри сессии Claude Code) и systemd-юнит
-> для демона — ещё нет.
+> Статус: ядро моста (демон + CLI), systemd-сервис демона и команда/skill
+> `/delta-chat` (on/off/status внутри сессии Claude Code) — реализовано и
+> проверено вживую: создание сессионного чата, отправка, приём текста и
+> голосовых.
 
 ## Механизм обратной связи
 
@@ -93,6 +93,35 @@ claude-delta close <session_id>
 DELTA_ADDR=bot@example.org DELTA_PASSWORD=... DELTA_PEER_ADDR=me@example.org \
   python -m claude_delta.daemon
 ```
+
+## Деплой демона (systemd --user)
+
+Один демон обслуживает произвольное число одновременных сессий (каждая —
+свой `session_id`/чат), поэтому это постоянный сервис, а не то, что
+поднимается по требованию:
+
+```bash
+mkdir -p ~/.config/claude-delta
+cp deploy/daemon.env.example ~/.config/claude-delta/daemon.env  # и заполнить реальными значениями
+chmod 600 ~/.config/claude-delta/daemon.env
+
+mkdir -p ~/.config/systemd/user
+ln -sf "$(pwd)/deploy/claude-delta-daemon.service" ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now claude-delta-daemon.service
+```
+
+Запускается вместе с desktop-сессией пользователя (`WantedBy=default.target`)
+— без `loginctl enable-linger`, поскольку открытая сессия и есть
+предпосылка для удалённого управления ею через Delta Chat.
+
+## Команда/skill `/delta-chat`
+
+`~/.claude/commands/delta-chat.md` (не синхронизируется через vault,
+локально на каждой машине) — `on` создаёт чат под текущую сессию Claude
+Code (`$CLAUDE_CODE_SESSION_ID`), `off` шлёт в чат «сессия неактивна» и
+закрывает её в drop-box (сам чат не удаляется — это делает пользователь
+вручную), `status` проверяет живость демона и сессии.
 
 ## Конфигурация
 

@@ -67,6 +67,14 @@ def cmd_check(args):
 
 
 def cmd_close(args):
+    sess = store.get_session(DB_PATH, args.session_id)
+    if not sess:
+        print("нет такой сессии", file=sys.stderr)
+        return 1
+    store.enqueue_outbox(
+        DB_PATH, args.session_id, sess["chat_id"],
+        "— сессия неактивна, дальше сюда можно не писать —",
+    )
     store.disarm_session(DB_PATH, args.session_id)
     return 0
 

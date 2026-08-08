@@ -1,0 +1,15 @@
+[Unit]
+Description=claude-delta bridge daemon (Delta Chat <-> Claude Code)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/claude-delta/daemon.env
+Environment=PATH=%h/work/claude-delta/.venv/bin:/usr/bin:/bin
+ExecStart=%h/work/claude-delta/.venv/bin/python -m claude_delta.daemon
+WorkingDirectory=%h/work/claude-delta
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
