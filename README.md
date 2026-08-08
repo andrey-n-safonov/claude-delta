@@ -12,7 +12,10 @@ Delta Chat выбран как транспорт вместо, например
 площадки, которая может быть недоступна в отдельных сетях/регионах без
 дополнительного туннелирования.
 
-> Статус: архитектура определена, реализация не начата.
+> Статус: ядро моста (демон + CLI) реализовано и проверено вживую —
+> создание сессионного чата, отправка, приём текста и голосовых. Skill
+> `/delta-standby` (arm/disarm внутри сессии Claude Code) и systemd-юнит
+> для демона — ещё нет.
 
 ## Механизм обратной связи
 
@@ -64,10 +67,37 @@ raw IMAP IDLE вручную не нужно.
 2. Пометить запись в drop-box закрытой
 3. Демон-мост не останавливать — общий для всех сессий
 
+## Реализация
+
+Демон (`claude_delta.daemon`) — единственный процесс, которому разрешено
+держать открытым соединение с Delta Chat. CLI (`claude_delta.cli`) и
+будущая сессия говорят только с общим sqlite drop-box
+(`claude_delta.store`) — так исключается конфликт двух процессов за один
+account db.
+
+```
+claude-delta create-session <session_id> [--name NAME]   # -> chat_id
+claude-delta send <session_id> <text>
+claude-delta check <session_id>                          # новые сообщения, JSON lines
+claude-delta close <session_id>
+```
+
+Голосовые сообщения распознаются локально через `faster-whisper` (модель
+`small`, CPU, без PyTorch/облака) — см. `claude_delta.stt`. Текст приходит
+с префиксом `[голосовое]`.
+
+Демон запускается переменными окружения `DELTA_ADDR`, `DELTA_PASSWORD`,
+`DELTA_PEER_ADDR`, `DELTA_ACCOUNTS_DIR`, `DELTA_STORE_DB`:
+
+```
+DELTA_ADDR=bot@example.org DELTA_PASSWORD=... DELTA_PEER_ADDR=me@example.org \
+  python -m claude_delta.daemon
+```
+
 ## Конфигурация
 
 Секреты (адрес и пароль ящика бота) не хранятся в репозитории — только в
-локальном gitignored конфиге, см. `.gitignore`.
+переменных окружения при запуске демона.
 
 ## Лицензия
 
