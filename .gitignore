@@ -5,3 +5,7 @@ config.local.*
 *.key
 *.pem
 secrets/
+.venv/
+accounts/
+__pycache__/
+*.pyc
