@@ -69,6 +69,7 @@ def _process_outbox(bridge: Bridge, db_path: str):
 
 def _process_inbox(bridge: Bridge, db_path: str):
     for sess in store.armed_sessions(db_path):
+        processed_ids = []
         for msg in bridge.fetch_new_messages(sess["chat_id"]):
             text = msg["text"]
             if msg["view_type"] in VOICE_VIEW_TYPES and msg["file"]:
@@ -80,6 +81,13 @@ def _process_inbox(bridge: Bridge, db_path: str):
                     text = "[голосовое — распознать не удалось]"
             store.store_inbox_message(db_path, sess["chat_id"], msg["id"], text)
             log.info("сессия %s: новое сообщение (msg_id=%s) %r", sess["session_id"], msg["id"], text[:60])
+            processed_ids.append(msg["id"])
+        # Удаляем только после того, как всё (включая STT) обработано —
+        # см. комментарий в Bridge.delete_processed.
+        try:
+            bridge.delete_processed(processed_ids)
+        except Exception:
+            log.exception("сессия %s: ошибка удаления обработанных сообщений", sess["session_id"])
 
 
 def run():

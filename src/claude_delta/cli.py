@@ -3,10 +3,15 @@ CLI для сессии Claude Code: говорит только с sqlite drop-
 никогда напрямую с Delta Chat — это монополия демона (daemon.py).
 
 Команды:
-  create-session <session_id> [--name NAME]   -> печатает chat_id
+  create-session <session_id> [--name NAME] [--message TEXT]  -> печатает chat_id
   send <session_id> <text>
   check <session_id>                          -> печатает новые сообщения (JSON lines)
   close <session_id>
+
+Новый групповой чат в Delta Chat остаётся "непромотированным" (не виден
+собеседнику), пока не отправлено хотя бы одно сообщение — поэтому
+create-session без --message создаёт чат, который у пользователя не
+появится. --message обязателен по смыслу (короткая тема сессии).
 """
 import argparse
 import json
@@ -35,7 +40,11 @@ def cmd_create_session(args):
     while time.time() < deadline:
         status = store.get_session_request_status(DB_PATH, session_id)
         if status and status["status"] == "ready":
-            print(status["chat_id"])
+            chat_id = status["chat_id"]
+            # Без первого сообщения групповой чат остаётся
+            # "непромотированным" и не появляется у собеседника.
+            store.enqueue_outbox(DB_PATH, session_id, chat_id, args.message or name)
+            print(chat_id)
             return 0
         if status and status["status"] == "error":
             print(f"ошибка создания сессии: {status['error']}", file=sys.stderr)
@@ -86,6 +95,7 @@ def main():
     p = sub.add_parser("create-session")
     p.add_argument("session_id")
     p.add_argument("--name")
+    p.add_argument("--message", help="первое сообщение — без него чат не появится у собеседника")
     p.set_defaults(func=cmd_create_session)
 
     p = sub.add_parser("send")

@@ -75,6 +75,11 @@ class Bridge:
         Возвращает словари {id, text, file, file_mime, view_type} — для
         голосовых/аудио text обычно пуст, а file указывает на локальный
         путь к скачанному вложению (распознаётся отдельно, см. stt.py).
+
+        Не удаляет сообщения — вызывающий должен сначала дообработать
+        (например распознать голосовое, читая file), и только потом
+        вызвать delete_processed(). Иначе delete_messages() снесёт
+        локальный блоб раньше, чем STT успеет его прочитать.
         """
         chat = self._account.get_chat_by_id(chat_id)
         result = []
@@ -90,3 +95,11 @@ class Bridge:
                 })
                 m.mark_seen()
         return result
+
+    def delete_processed(self, msg_ids: list[int]) -> None:
+        """Удалить сообщения локально и на сервере бота — драгоценная
+        копия уже лежит в drop-box, на сервере ей незачем копиться."""
+        if not msg_ids:
+            return
+        messages = [self._account.get_message_by_id(i) for i in msg_ids]
+        self._account.delete_messages(messages)
