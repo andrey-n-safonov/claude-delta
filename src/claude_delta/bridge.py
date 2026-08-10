@@ -1,7 +1,7 @@
 """
-Тонкая обёртка над deltachat_rpc_client: всё общение с Delta Chat идёт
-только отсюда, и только из демона (daemon.py) — единственного процесса,
-которому разрешено держать открытым account db.
+Thin wrapper over deltachat_rpc_client: all Delta Chat communication goes
+only through here, and only from the daemon (daemon.py) — the only
+process allowed to hold the account db open.
 """
 import os
 
@@ -42,13 +42,14 @@ class Bridge:
         return self._account
 
     def peer_contact(self):
-        """Возвращает уже известный key-contact пользователя.
+        """Returns the already-known key-contact for the user.
 
-        Групповые чаты с шифрованием требуют key-contact (с обменянным
-        публичным ключом) — create_contact() по одному адресу создаёт
-        обычный address-contact без ключа и для encrypted-групп не
-        годится ("Only key-contacts can be added to encrypted chats").
-        Ключ уже есть после ручного secure-join/переписки, ищем его.
+        Encrypted group chats require a key-contact (with an exchanged
+        public key) — create_contact() from a bare address creates a
+        plain address-contact without a key, which doesn't work for
+        encrypted groups ("Only key-contacts can be added to encrypted
+        chats"). The key already exists after a prior manual
+        secure-join/exchange, we just look it up.
         """
         contact = self._account.get_contact_by_addr(self.peer_addr)
         if contact is None:
@@ -59,7 +60,7 @@ class Bridge:
         return contact
 
     def create_session_group(self, name: str) -> int:
-        """Создаёт групповой чат под сессию с уже известным контактом-пользователем."""
+        """Creates a group chat for a session with the already-known user contact."""
         chat = self._account.create_group(name)
         chat.add_contact(self.peer_contact())
         return chat.id
@@ -69,36 +70,52 @@ class Bridge:
         msg = chat.send_text(text)
         return msg.id
 
-    def fetch_new_messages(self, chat_id: int):
-        """Все непрочитанные входящие в чате, помечает их прочитанными (MDN).
+    DC_STATE_IN_FRESH = 10
 
-        Возвращает словари {id, text, file, file_mime, view_type} — для
-        голосовых/аудио text обычно пуст, а file указывает на локальный
-        путь к скачанному вложению (распознаётся отдельно, см. stt.py).
+    def fetch_all_fresh_messages(self):
+        """All unread incoming messages across *every* chat on the
+        account, marks them read (MDN) — one RPC round-trip regardless of
+        how many armed sessions exist, via Account.get_fresh_messages().
 
-        Не удаляет сообщения — вызывающий должен сначала дообработать
-        (например распознать голосовое, читая file), и только потом
-        вызвать delete_processed(). Иначе delete_messages() снесёт
-        локальный блоб раньше, чем STT успеет его прочитать.
+        Reliability note (2026-08-10): the previous per-chat approach
+        called chat.get_messages() (the chat's *entire* history) plus a
+        get_snapshot() RPC per message, once per armed session, every
+        ~5s poll — a growing, unbounded cost as a chat accumulates
+        forwarded prompts (dozens per session in a long run), repeated
+        for every armed session in the same single-threaded loop that
+        also runs prompt detection and delivery. get_fresh_messages()
+        only returns what's actually unread, account-wide.
+
+        Returns dicts {id, chat_id, text, file, file_mime, view_type} —
+        for voice/audio messages text is usually empty and file points to
+        the locally downloaded attachment (transcribed separately, see
+        stt.py). Caller is responsible for routing by chat_id.
+
+        Does not delete messages — the caller must finish post-processing
+        first (e.g. transcribe a voice message by reading file), and only
+        then call delete_processed(). Otherwise delete_messages() would
+        wipe the local blob before STT gets a chance to read it.
         """
-        chat = self._account.get_chat_by_id(chat_id)
         result = []
-        for m in chat.get_messages():
+        for m in self._account.get_fresh_messages():
             snap = m.get_snapshot()
-            if snap.state == 10:  # DC_STATE_IN_FRESH
-                result.append({
-                    "id": m.id,
-                    "text": snap.text,
-                    "file": snap.file,
-                    "file_mime": snap.file_mime,
-                    "view_type": snap.view_type,
-                })
-                m.mark_seen()
+            if snap.state != self.DC_STATE_IN_FRESH:
+                continue
+            result.append({
+                "id": m.id,
+                "chat_id": snap.chat_id,
+                "text": snap.text,
+                "file": snap.file,
+                "file_mime": snap.file_mime,
+                "view_type": snap.view_type,
+            })
+            m.mark_seen()
         return result
 
     def delete_processed(self, msg_ids: list[int]) -> None:
-        """Удалить сообщения локально и на сервере бота — драгоценная
-        копия уже лежит в drop-box, на сервере ей незачем копиться."""
+        """Delete messages locally and on the bot's server — a precious
+        copy already lives in the drop-box, no need to pile up on the
+        server too."""
         if not msg_ids:
             return
         messages = [self._account.get_message_by_id(i) for i in msg_ids]

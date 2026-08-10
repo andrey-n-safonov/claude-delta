@@ -16,6 +16,19 @@ Delta Chat выбран как транспорт вместо, например
 > `/delta-chat` (on/off/status внутри сессии Claude Code) — реализовано и
 > проверено вживую: создание сессионного чата, отправка, приём текста и
 > голосовых.
+>
+> **Диспетчер поверх tmux** (2026-08-10) — реализован поверх того же
+> демона: для сессий, зарегистрированных в tmux (`register-tmux`),
+> permission-промпты харнеста детектятся в панели и форвардятся в чат
+> автономно, ответы инжектятся обратно через `tmux send-keys` — без
+> `/loop`/`ScheduleWakeup` внутри сессии. Детект — структурный (курсор
+> `❯` перед пронумерованной опцией у конца видимой панели), не завязан
+> на конкретную формулировку вопроса — калиброван на реальных захватах
+> живых панелей, см. `tests/fixtures/` и `docs/design.md` в vault.
+> Переименование пакета в `claude-delta-dispatch` (упоминалось в
+> design.md) сознательно отложено — косметический шаг с большой площадью
+> правок, отдельным коммитом после того, как функциональность
+> устоялась.
 
 ## Механизм обратной связи
 
@@ -77,8 +90,9 @@ account db.
 
 ```
 claude-delta create-session <session_id> [--name NAME]   # -> chat_id
+claude-delta register-tmux <session_id> [--target TARGET] # -> target, включает tmux-диспетчер (по умолчанию $TMUX_PANE)
 claude-delta send <session_id> <text>
-claude-delta check <session_id>                          # новые сообщения, JSON lines
+claude-delta check <session_id>                          # новые сообщения, JSON lines (не нужно для tmux-сессий — доставляет диспетчер)
 claude-delta close <session_id>
 ```
 

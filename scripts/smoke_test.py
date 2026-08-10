@@ -1,7 +1,7 @@
 """
-Одноразовый smoke-test: логин ботом в Delta Chat, проверка конфигурации аккаунта.
-Не часть демона — только чтобы убедиться, что связка работает перед тем,
-как писать постоянный мост.
+One-off smoke test: bot login to Delta Chat, account configuration check.
+Not part of the daemon — just to confirm the setup works before writing
+the permanent bridge.
 """
 import os
 

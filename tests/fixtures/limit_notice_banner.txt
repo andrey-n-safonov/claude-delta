@@ -1,0 +1,10 @@
+  Listed 1 directory
+  ⎿  You've hit your session limit · resets 2:10pm (Europe/Moscow)
+
+✻ Baked for 55s
+                                                                   ~281k uncached · /clear to start fresh
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+   omni055 │ claude-sonnet-5 │ ctx: ██░░░░░░░░ 28% │ 📁 Pirelli │ Перенос сетевого инвентаря в NetBox
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents

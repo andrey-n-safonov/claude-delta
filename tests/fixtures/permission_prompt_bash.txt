@@ -1,0 +1,23 @@
+               routable_subnets = [s.strip() for s in str(subnet).split('\n') if s.strip()]
+           clean = subnet_re.sub('', desc).strip()
+           if not clean:
+               clean = desc
+           rows_out.append((sitecode, int(vid), clean, desc, ';'.join(routable_subnets)))
+
+   with open('/tmp/vlan_plan.csv','w',newline='') as f:
+       w = csv.writer(f, delimiter=';')
+       w.writerow(['site','vid','name','description','subnets'])
+       w.writerows(rows_out)
+
+   for r in rows_out:
+       print(r)
+   EOF
+   Run shell command
+
+ Contains brace with quote character (expansion obfuscation)
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain

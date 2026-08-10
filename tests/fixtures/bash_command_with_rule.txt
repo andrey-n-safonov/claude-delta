@@ -1,0 +1,23 @@
+  ⎿  $ TOKEN=$(grep '^token' ~/work/mcp-netbox/config.ini | cut -d'=' -f2 | tr -d ' '); curl -s -k
+     --socks5-hostname 127.0.0.1:1080 -H "Authorization: Token $TOKEN"
+     https://netbox.rugroup.local/api/status/ | head -c 500; echo; echo "---OPTIONS vlan-groups---"; curl
+     -s -k --socks5-hostname 127.0.0.1:1080…
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   TOKEN=$(grep '^token' ~/work/mcp-netbox/config.ini | cut -d'=' -f2 | tr -d ' '); curl -s -k
+   --socks5-hostname 127.0.0.1:1080 -H "Authorization: Token $TOKEN"
+   https://netbox.rugroup.local/api/status/ | head -c 500; echo; echo "---OPTIONS vlan-groups---"; curl
+   -s -k --socks5-hostname 127.0.0.1:1080 -H "Authorization: Token $TOKEN" -X OPTIONS
+   https://netbox.rugroup.local/api/ipam/vlan-groups/ | python3 -c "import json,sys;
+   d=json.load(sys.stdin); print(list(d.get('actions',{}).get('POST',{}).keys()))"
+   Run shell command
+
+ Parse error
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain

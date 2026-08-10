@@ -1,17 +1,23 @@
 """
-CLI для сессии Claude Code: говорит только с sqlite drop-box (store.py),
-никогда напрямую с Delta Chat — это монополия демона (daemon.py).
+CLI for the Claude Code session: talks only to the sqlite drop-box
+(store.py), never directly to Delta Chat — that's the daemon's monopoly
+(daemon.py).
 
-Команды:
-  create-session <session_id> [--name NAME] [--message TEXT]  -> печатает chat_id
+Commands:
+  create-session <session_id> [--name NAME] [--message TEXT]  -> prints chat_id
+  register-tmux <session_id> [--target TARGET]  -> prints target (defaults
+      to $TMUX_PANE) — turns on the tmux dispatcher for the session:
+      permission prompts get forwarded to the chat, replies get injected
+      back via tmux send-keys, without any action from the session's code
+      (see daemon.py, _process_tmux_prompts/_process_tmux_delivery)
   send <session_id> <text>
-  check <session_id>                          -> печатает новые сообщения (JSON lines)
+  check <session_id>                          -> prints new messages (JSON lines)
   close <session_id>
 
-Новый групповой чат в Delta Chat остаётся "непромотированным" (не виден
-собеседнику), пока не отправлено хотя бы одно сообщение — поэтому
-create-session без --message создаёт чат, который у пользователя не
-появится. --message обязателен по смыслу (короткая тема сессии).
+A new Delta Chat group chat stays "unpromoted" (invisible to the peer)
+until at least one message has been sent — so create-session without
+--message creates a chat the user will never see. --message is required
+by design (a short session topic).
 """
 import argparse
 import json
@@ -33,6 +39,20 @@ def cmd_create_session(args):
     if existing and existing["status"] == "armed":
         print(existing["chat_id"])
         return 0
+    if existing:
+        # off -> on: the chat already exists, no need to round-trip
+        # through the daemon's session_requests queue at all — just flip
+        # status back to armed in place. Reliability note (2026-08-10):
+        # going through request_session() here used to no-op (INSERT OR
+        # IGNORE against the still-'ready' row from the *first* on), so
+        # the wait loop below reported success immediately — but nothing
+        # ever set sessions.status back to 'armed', so the chat looked
+        # alive (send still worked, same chat_id) while delivery/
+        # forwarding silently never resumed. See store.rearm_session.
+        chat_id = store.rearm_session(DB_PATH, session_id)
+        store.enqueue_outbox(DB_PATH, session_id, chat_id, args.message or name)
+        print(chat_id)
+        return 0
 
     store.request_session(DB_PATH, session_id, name)
 
@@ -41,8 +61,8 @@ def cmd_create_session(args):
         status = store.get_session_request_status(DB_PATH, session_id)
         if status and status["status"] == "ready":
             chat_id = status["chat_id"]
-            # Без первого сообщения групповой чат остаётся
-            # "непромотированным" и не появляется у собеседника.
+            # Without a first message the group chat stays "unpromoted"
+            # and never shows up for the peer.
             store.enqueue_outbox(DB_PATH, session_id, chat_id, args.message or name)
             print(chat_id)
             return 0
@@ -53,6 +73,24 @@ def cmd_create_session(args):
 
     print("таймаут: демон не ответил — запущен ли claude-delta-daemon?", file=sys.stderr)
     return 1
+
+
+def cmd_register_tmux(args):
+    sess = store.get_session(DB_PATH, args.session_id)
+    if not sess:
+        print("нет такой сессии — сначала create-session", file=sys.stderr)
+        return 1
+    target = args.target or os.environ.get("TMUX_PANE")
+    if not target:
+        print(
+            "не в tmux и --target не передан — permission-промпты форвардиться не будут "
+            "(нужен $TMUX_PANE или явный --target)",
+            file=sys.stderr,
+        )
+        return 1
+    store.register_tmux(DB_PATH, args.session_id, target)
+    print(target)
+    return 0
 
 
 def cmd_send(args):
@@ -85,6 +123,7 @@ def cmd_close(args):
         "— сессия неактивна, дальше сюда можно не писать —",
     )
     store.disarm_session(DB_PATH, args.session_id)
+    store.clear_tmux(DB_PATH, args.session_id)  # dispatcher stops touching the pane
     return 0
 
 
@@ -97,6 +136,11 @@ def main():
     p.add_argument("--name")
     p.add_argument("--message", help="первое сообщение — без него чат не появится у собеседника")
     p.set_defaults(func=cmd_create_session)
+
+    p = sub.add_parser("register-tmux")
+    p.add_argument("session_id")
+    p.add_argument("--target", help="tmux pane-id, по умолчанию $TMUX_PANE")
+    p.set_defaults(func=cmd_register_tmux)
 
     p = sub.add_parser("send")
     p.add_argument("session_id")

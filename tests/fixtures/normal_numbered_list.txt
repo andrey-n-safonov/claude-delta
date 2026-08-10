@@ -1,0 +1,11 @@
+● Plan for the migration:
+
+  1. Back up the current cluster config
+  2. Validate against the staging environment
+  3. Roll out to production during the maintenance window
+
+  Let me know if you'd like me to start with step 1.
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────

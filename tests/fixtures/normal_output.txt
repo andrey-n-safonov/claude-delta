@@ -1,0 +1,6 @@
+$ ls -la
+total 12
+drwxr-xr-x  2 ans ans 4096 Aug 10 09:00 .
+drwxr-xr-x 10 ans ans 4096 Aug 10 08:00 ..
+-rw-r--r--  1 ans ans  123 Aug 10 09:00 notes.txt
+$
