@@ -16,6 +16,7 @@ Usage:
 import os
 import sys
 import threading
+from urllib.parse import parse_qs
 
 from deltachat_rpc_client import DeltaChat, Rpc
 
@@ -23,11 +24,34 @@ ACCOUNTS_DIR = os.environ.get("DELTA_ACCOUNTS_DIR", "./accounts")
 TIMEOUT_SEC = 60
 
 
+def parse_peer_addr(qr: str) -> str | None:
+    """Both link forms (`https://i.delta.chat/#...` and `OPENPGP4FPR:...#...`)
+    carry the peer's address as the `a=` param after the `#` — no need to
+    ask the user for DELTA_PEER_ADDR separately, it's already in the link
+    they send for step 5 of INSTALL.md."""
+    if "#" not in qr:
+        return None
+    values = parse_qs(qr.split("#", 1)[1]).get("a")
+    return values[0] if values else None
+
+
 def main():
     if len(sys.argv) != 2:
         print("usage: securejoin.py <qr-or-link>", file=sys.stderr)
         return 1
     qr = sys.argv[1]
+
+    parsed_peer = parse_peer_addr(qr)
+    env_peer = os.environ.get("DELTA_PEER_ADDR")
+    if parsed_peer:
+        print("peer-адрес из ссылки:", parsed_peer)
+    if env_peer and parsed_peer and env_peer != parsed_peer:
+        print(
+            f"ВНИМАНИЕ: DELTA_PEER_ADDR={env_peer} не совпадает с адресом "
+            f"из ссылки ({parsed_peer}) — проверь daemon.env",
+            file=sys.stderr,
+        )
+    peer_addr = env_peer or parsed_peer
 
     with Rpc(accounts_dir=ACCOUNTS_DIR) as rpc:
         deltachat = DeltaChat(rpc)

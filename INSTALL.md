@@ -25,11 +25,15 @@ ls -la ~/.claude/commands/delta-chat.md 2>/dev/null
 
 - `python3 --version` — нужен ≥ 3.11.
 - `which tmux sqlite3` — оба нужны (tmux — для диспетчера, sqlite3 — для
-  ручной диагностики drop-box).
+  ручной диагностики drop-box). Имя **пакета** для установки зависит от
+  дистрибутива и не всегда совпадает с именем бинарника — на Fedora
+  пакет называется `sqlite`, бинарник всё равно `sqlite3` (на
+  Debian/Ubuntu пакет и называется `sqlite3`). Проверяй по `which`, а не
+  по названию пакета в голове.
 - `systemctl --user status` — работает (у пользователя есть DBus-сессия).
 - Исходящий доступ к IMAP/SMTP (порты 993 и 465) для того провайдера,
-  который выберут под ящик бота — не проверяй заранее, это уйдёт в
-  smoke-test на шаге 5.
+  который выберут под ящик бота — не проверяй заранее, это проявится
+  само на шаге 5 (в логе демона).
 - **Важно**: юнит демона (`deploy/claude-delta-daemon.service`) сделан
   `WantedBy=default.target` и **без** `loginctl enable-linger` —
   осознанное решение апстрима: открытая пользовательская сессия — это и
@@ -96,28 +100,38 @@ ls -la ~/.claude/commands/delta-chat.md 2>/dev/null
    IMAP/SMTP-доступа.
 2. Сгенерировать app-password для этого ящика (не основной пароль
    почты).
-3. Передать тебе: адрес ящика, app-password, IMAP/SMTP хост:порт (нужен
-   только если провайдер не входит во встроенную базу автоконфига
-   deltachat-core — Yandex и mail.ru проверены, работают без явных
-   host:port).
-4. Подтвердить `DELTA_PEER_ADDR` — обычно тот же личный адрес
-   пользователя, что уже используется для другого хоста (см. vault,
-   если доступен), потому что это один и тот же человек/телефон с Delta
-   Chat.
-5. **Прислать secure-join ссылку/QR** — без неё бот не сможет создавать
+3. Передать тебе одним сообщением, нумерованным списком, чтобы ничего не
+   потерялось:
+   1. адрес ящика бота;
+   2. app-password (не основной пароль);
+   3. IMAP/SMTP хост:порт — **только** если провайдер не входит во
+      встроенную базу автоконфига deltachat-core (Yandex и mail.ru
+      проверены, работают без явных host:port; для прочих уточни явно).
+4. **Прислать secure-join ссылку/QR** — без неё бот не сможет создавать
    чаты (`peer_contact()` требует уже известный key-contact). В Delta
    Chat на телефоне: своя учётка → «Пригласить друзей» / «Add contact»
    → показать QR или скопировать ссылку вида
    `https://i.delta.chat/#FINGERPRINT&v=3&i=...&s=...&a=...&n=...` —
    присылают текстом, распознаётся по префиксу `https://i.delta.chat/#`
-   или `OPENPGP4FPR:`. Надёжнее обычного письма (см. п.6) — обходит
+   или `OPENPGP4FPR:`. Надёжнее обычного письма (см. шаг 4а) — обходит
    спам-фильтры, проверено 2026-08-11 на смене ящика omni055.
+
+   **`DELTA_PEER_ADDR` отдельно спрашивать не нужно** — он уже есть в
+   этой же ссылке параметром `a=` (`parse_peer_addr()` в
+   `scripts/securejoin.py` его вытаскивает; тот же приём одной строкой:
+   `python3 -c "from urllib.parse import parse_qs; print(parse_qs('<ссылка>'.split('#',1)[1])['a'][0])"`).
+   Получаешь ссылку — сразу знаешь и её, и peer-адрес.
 
 ## 4. Установка (выполняешь сам после получения кредов)
 
 ```bash
-# 4.1 Клонировать (или обновить, если уже клонировано под другим шагом)
-git clone https://github.com/andrey-n-safonov/claude-delta.git ~/work/claude-delta
+# 4.1 Клонировать, либо, если уже клонировано (в т.ч. в этой же сессии
+# раньше или прошлой установкой) — git pull, не клонировать поверх:
+if [ -d ~/work/claude-delta/.git ]; then
+  git -C ~/work/claude-delta pull
+else
+  git clone https://github.com/andrey-n-safonov/claude-delta.git ~/work/claude-delta
+fi
 cd ~/work/claude-delta
 
 # 4.2 Виртуальное окружение
@@ -137,7 +151,9 @@ deactivate
 # 4.3 Конфиг демона
 mkdir -p ~/.config/claude-delta
 cp deploy/daemon.env.example ~/.config/claude-delta/daemon.env
-# отредактировать daemon.env: DELTA_ADDR, DELTA_PASSWORD, DELTA_PEER_ADDR
+# отредактировать daemon.env: DELTA_ADDR, DELTA_PASSWORD — из шага 3.
+# DELTA_PEER_ADDR — не спрашивать пользователя, взять параметром `a=`
+# из secure-join ссылки (см. шаг 3, п.4).
 # (DELTA_ACCOUNTS_DIR и DELTA_STORE_DB уже указывают на ~/work/claude-delta/…,
 #  трогать не нужно, если не просили другой путь)
 chmod 600 ~/.config/claude-delta/daemon.env
@@ -168,12 +184,15 @@ systemctl --user stop claude-delta-daemon.service   # аккаунт экскл�
 
 cd ~/work/claude-delta && source .venv/bin/activate
 export DELTA_ACCOUNTS_DIR="$HOME/work/claude-delta/accounts"
-export DELTA_PEER_ADDR="<адрес пользователя>"
 python scripts/securejoin.py '<ссылка, которую прислал пользователь>'
 deactivate
 
 systemctl --user start claude-delta-daemon.service
 ```
+
+`DELTA_PEER_ADDR` можно не экспортировать — скрипт сам разбирает `a=` из
+той же ссылки и печатает результат; переменная нужна только если хочешь
+явно свериться (несовпадение скрипт подсветит сам).
 
 Ждёт до 60с подтверждения (`progress=1000`), в конце печатает результат
 `get_contact_by_addr` — контакт должен быть найден (не `None`). Если
@@ -186,22 +205,39 @@ systemctl --user start claude-delta-daemon.service
 ## 5. Проверка
 
 ```bash
-# Логи демона — ждём успешного логина в Delta Chat, без ошибок IMAP/SMTP
+# Логи демона — ждём успешного логина в Delta Chat, без ошибок IMAP/SMTP.
+# С 2026-08-11 демон сам логирует итог connectivity после start_io()
+# ("connectivity после start_io(): подключён" или похожее) — отдельный
+# smoke-test для этого не нужен.
 journalctl --user -u claude-delta-daemon.service -n 40 --no-pager
-
-# Встроенный smoke-test (логин + базовая проверка)
-cd ~/work/claude-delta && source .venv/bin/activate
-python scripts/smoke_test.py
-deactivate
 ```
 
 Если демон не поднялся — не трогай ничего в самом Delta Chat аккаунте
 пользователя (не удаляй чаты/письма), просто покажи лог и спроси, как
 продолжать.
 
-Живой тест (если есть открытая tmux-сессия Claude Code на этой машине):
-внутри неё выполнить `/delta-chat on`, убедиться, что создался чат в
-Delta Chat на телефоне пользователя, затем `/delta-chat off`.
+**Не запускай `scripts/smoke_test.py` параллельно с работающим демоном**
+— оба открывают один и тот же account db эксклюзивно
+(`accounts.lock file is already locked`). Он нужен только для
+самого первого логина ДО первого старта демона (см. шаг 4а — тот же
+принцип, `securejoin.py` тоже требует демон остановленным); если демон
+уже поднят и в логе нет ошибок — отдельно перепроверять смысла нет.
+
+Живой функциональный тест — без входа с телефона, через CLI напрямую
+(что реально проверяет создание чата end-to-end, не только логин):
+```bash
+cd ~/work/claude-delta && source .venv/bin/activate
+export DELTA_STORE_DB="$HOME/work/claude-delta/bridge.sqlite3"
+SID="install-test-$(date +%s)"
+python -m claude_delta.cli create-session "$SID" --name "Тест установки" --message "Тест установки, можно игнорировать"
+sleep 3
+python -m claude_delta.cli close "$SID"
+deactivate
+```
+Проверь `journalctl` на «создан чат id=…» и «outbox … отправлен» без
+ошибок, и попроси пользователя подтвердить, что сообщение дошло на
+телефон. Если есть открытая tmux-сессия Claude Code на этой машине —
+дополнительно можно проверить `/delta-chat on` / `/delta-chat off`.
 
 ## 6. После установки
 

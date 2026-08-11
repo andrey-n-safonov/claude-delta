@@ -3,9 +3,22 @@ Thin wrapper over deltachat_rpc_client: all Delta Chat communication goes
 only through here, and only from the daemon (daemon.py) — the only
 process allowed to hold the account db open.
 """
+import logging
 import os
+import time
 
 from deltachat_rpc_client import Account, DeltaChat, Rpc
+
+log = logging.getLogger(__name__)
+
+# DC_CONNECTIVITY_* thresholds from deltachat-core (jsonrpc get_connectivity).
+_CONNECTIVITY_LABELS = {
+    1000: "не подключён",
+    2000: "подключается",
+    3000: "работает (не все папки синхронизированы)",
+    4000: "подключён",
+}
+_CONNECTIVITY_POLL_TIMEOUT_SEC = 15
 
 
 class Bridge:
@@ -29,7 +42,29 @@ class Bridge:
             self._account.set_config("mail_pw", self.bot_password)
             self._account.configure()
         self._account.start_io()
+        self._log_connectivity()
         return self
+
+    def _log_connectivity(self):
+        """Best-effort: poll get_connectivity() briefly and log the
+        result, so the daemon's log answers "did IMAP/SMTP actually come
+        up" instead of going silent after "RPC server ready" until the
+        first 10-minute fallback-restart log line (see design.md).
+        Never raises — a missing/renamed jsonrpc method on some future
+        core version shouldn't take the daemon down over a log line.
+        """
+        deadline = time.time() + _CONNECTIVITY_POLL_TIMEOUT_SEC
+        last = None
+        try:
+            while time.time() < deadline:
+                last = self._rpc.get_connectivity(self._account.id)
+                if last >= 3000:
+                    break
+                time.sleep(1)
+            label = _CONNECTIVITY_LABELS.get(last, f"код {last}")
+            log.info("connectivity после start_io(): %s", label)
+        except Exception:
+            log.exception("не удалось проверить connectivity (не критично, продолжаю)")
 
     def __exit__(self, *exc):
         if self._account is not None:
