@@ -96,13 +96,22 @@ ls -la ~/.claude/commands/delta-chat.md 2>/dev/null
    IMAP/SMTP-доступа.
 2. Сгенерировать app-password для этого ящика (не основной пароль
    почты).
-3. Передать тебе: адрес ящика, app-password, IMAP/SMTP хост:порт (если
-   провайдер не Yandex — уточни, дефолты в `daemon.env.example`
-   рассчитаны на Yandex).
+3. Передать тебе: адрес ящика, app-password, IMAP/SMTP хост:порт (нужен
+   только если провайдер не входит во встроенную базу автоконфига
+   deltachat-core — Yandex и mail.ru проверены, работают без явных
+   host:port).
 4. Подтвердить `DELTA_PEER_ADDR` — обычно тот же личный адрес
    пользователя, что уже используется для другого хоста (см. vault,
    если доступен), потому что это один и тот же человек/телефон с Delta
    Chat.
+5. **Прислать secure-join ссылку/QR** — без неё бот не сможет создавать
+   чаты (`peer_contact()` требует уже известный key-contact). В Delta
+   Chat на телефоне: своя учётка → «Пригласить друзей» / «Add contact»
+   → показать QR или скопировать ссылку вида
+   `https://i.delta.chat/#FINGERPRINT&v=3&i=...&s=...&a=...&n=...` —
+   присылают текстом, распознаётся по префиксу `https://i.delta.chat/#`
+   или `OPENPGP4FPR:`. Надёжнее обычного письма (см. п.6) — обходит
+   спам-фильтры, проверено 2026-08-11 на смене ящика omni055.
 
 ## 4. Установка (выполняешь сам после получения кредов)
 
@@ -146,6 +155,33 @@ ln -sf ~/work/claude-delta/deploy/commands/delta-chat.md ~/.claude/commands/delt
 Правь `daemon.env` через `Edit`/`Write`-инструменты, не через `sed` вслепую
 — значения содержат пароль, лучше явно увидеть итоговый файл (без вывода
 пароля в чат) перед `chmod`.
+
+## 4а. Bootstrap peer key-contact (обязательно для нового ящика)
+
+Свежесконфигурированный аккаунт бота не знает пользователя — `bridge.py`
+(`peer_contact()`) явно требует уже обменянный ключ, иначе
+`create_session_group()` падает с «нет известного key-contact». Нужно
+один раз (на каждый новый ящик бота) провести secure-join:
+
+```bash
+systemctl --user stop claude-delta-daemon.service   # аккаунт эксклюзивно нужен скрипту
+
+cd ~/work/claude-delta && source .venv/bin/activate
+export DELTA_ACCOUNTS_DIR="$HOME/work/claude-delta/accounts"
+export DELTA_PEER_ADDR="<адрес пользователя>"
+python scripts/securejoin.py '<ссылка, которую прислал пользователь>'
+deactivate
+
+systemctl --user start claude-delta-daemon.service
+```
+
+Ждёт до 60с подтверждения (`progress=1000`), в конце печатает результат
+`get_contact_by_addr` — контакт должен быть найден (не `None`). Если
+таймаут — не паникуй сразу: проверь `get_contact_by_addr` в выводе
+скрипта всё равно (Autocrypt-обмен иногда проходит без формального
+завершения хендшейка, см. `docs/design.md` в vault, инцидент
+2026-08-08); если и там `None` — проверь спам-папку почты бота и попроси
+пользователя переслать ссылку ещё раз.
 
 ## 5. Проверка
 
