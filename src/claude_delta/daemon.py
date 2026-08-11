@@ -38,6 +38,24 @@ VOICE_VIEW_TYPES = {"Voice", "Audio"}
 LOOP_INTERVAL_SEC = 5
 FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
 
+# Sent as its own injected line right after every delivered batch (never
+# merged into the delivered text itself — that stays verbatim, see
+# tmux.send_keys). Long sessions lose track of the standing /delta-chat
+# rule (context compaction, or it just wasn't salient when the reply
+# actually mattered) and answer normally instead of via `send` — the
+# reply then never reaches the phone. Repeating the rule at the moment
+# it's actually needed is cheaper than hoping it's still in attention
+# from whenever `on` ran (reported live 2026-08-11: session replied
+# in-pane only, chat never got a response).
+#
+# Deliberately just a stable, language-neutral tag, not the instruction
+# text itself — the daemon has no business knowing what language a given
+# session/skill runs in, and duplicating the rule's wording in both
+# daemon.py and the skill doc would drift. What the tag *means* is
+# documented exactly once, in deploy/commands/delta-chat.md, which
+# `/delta-chat on` already reads and follows regardless of language.
+_DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -265,6 +283,7 @@ def _process_tmux_delivery(db_path: str):
             continue
 
         consumer = f"dispatcher:{session_id}"
+        delivered_any = False
         for m in msgs:
             try:
                 tmux.send_keys(target, m["text"])
@@ -273,6 +292,13 @@ def _process_tmux_delivery(db_path: str):
                 break  # leave this and later messages unconsumed — retried next tick, in order
             store.mark_consumed(db_path, consumer, [m["id"]])
             log.info("сессия %s: ответ инжектирован в %s: %r", session_id, target, m["text"][:60])
+            delivered_any = True
+
+        if delivered_any:
+            try:
+                tmux.send_keys(target, _DELTA_CHAT_REMINDER_TAG)
+            except Exception:
+                log.exception("сессия %s: не удалось отправить напоминание в %s", session_id, target)
         # Deliberately NOT resetting last_prompt_hash/last_limit_hash
         # here (earlier versions did, unconditionally, "the pane
         # changed"). If the reply didn't actually resolve the dialog —
