@@ -5,6 +5,7 @@ process allowed to hold the account db open.
 """
 import logging
 import os
+import threading
 import time
 
 from deltachat_rpc_client import Account, DeltaChat, Rpc
@@ -19,6 +20,16 @@ _CONNECTIVITY_LABELS = {
     4000: "подключён",
 }
 _CONNECTIVITY_POLL_TIMEOUT_SEC = 15
+
+# stop_io()+rpc.close() reliably hung on every observed SIGTERM in
+# practice (confirmed live 2026-08-11/12 — every daemon restart this
+# session ended in "State 'stop-sigterm' timed out. Aborting." +
+# SIGABRT + coredump from systemd, ~40s after the request, not just
+# occasionally). Root cause not chased into deltachat-rpc-server's own
+# IMAP-logout handling — bounding it ourselves and force-killing the RPC
+# subprocess on timeout is cheap and makes every restart/deploy fast and
+# coredump-free regardless of what's actually stuck underneath.
+_SHUTDOWN_TIMEOUT_SEC = 10
 
 
 class Bridge:
@@ -67,10 +78,28 @@ class Bridge:
             log.exception("не удалось проверить connectivity (не критично, продолжаю)")
 
     def __exit__(self, *exc):
-        if self._account is not None:
-            self._account.stop_io()
-        if self._rpc is not None:
-            self._rpc.close()
+        done = threading.Event()
+
+        def _graceful_shutdown():
+            try:
+                if self._account is not None:
+                    self._account.stop_io()
+                if self._rpc is not None:
+                    self._rpc.close()
+            except Exception:
+                log.exception("ошибка при штатном выключении Bridge")
+            finally:
+                done.set()
+
+        threading.Thread(target=_graceful_shutdown, daemon=True).start()
+        if not done.wait(_SHUTDOWN_TIMEOUT_SEC):
+            log.warning(
+                "штатное выключение не уложилось в %sс — убиваю RPC-процесс "
+                "принудительно (иначе systemd добьёт SIGABRT'ом с коредампом)",
+                _SHUTDOWN_TIMEOUT_SEC,
+            )
+            if self._rpc is not None and self._rpc.process is not None:
+                self._rpc.process.kill()
 
     @property
     def account(self) -> Account:
