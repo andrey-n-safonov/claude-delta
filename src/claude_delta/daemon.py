@@ -22,7 +22,7 @@ import signal
 import sys
 import time
 
-from . import store, stt, tmux
+from . import sleepinhibit, store, stt, tmux
 from .bridge import Bridge
 from .prompt_detect import (
     extract_context,
@@ -343,6 +343,7 @@ def run():
                 _process_outbox(bridge, db_path)
                 _process_inbox(bridge, db_path)
                 _process_tmux_delivery(db_path)  # consumes what _process_inbox stored above
+                sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:
                 log.exception("ошибка в цикле демона")
 
@@ -354,6 +355,7 @@ def run():
 
             time.sleep(LOOP_INTERVAL_SEC)
 
+    sleepinhibit.shutdown()
     log.info("демон остановлен")
 
 
