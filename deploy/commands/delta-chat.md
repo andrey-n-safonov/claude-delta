@@ -9,7 +9,15 @@ agent: main
 `--user` сервис — эта команда с ним не взаимодействует напрямую, только
 через CLI/sqlite drop-box.
 
-Session id — переменная окружения `$CLAUDE_CODE_SESSION_ID`.
+Session id — переменная окружения `$CLAUDE_CODE_SESSION_ID`. Ниже во всех
+`claude-delta`/`python -m claude_delta.cli` вызовах она **не передаётся
+явно как позиционный аргумент** — CLI сам берёт её из окружения, если
+аргумент опущен. Так и должно быть: буквальный `"$CLAUDE_CODE_SESSION_ID"`
+в тексте команды — это shell-expansion, и permission-классификатор
+Claude Code просит подтверждение на такую команду при каждом вызове,
+сколько allow-правил ни добавляй (подставляемое значение не известно на
+момент сопоставления). Голый литерал без `$` матчится префиксным allow-
+правилом чисто.
 
 **Важно (архитектурный поворот 2026-08-09/10)**: если сессия запущена
 внутри tmux, `on` дополнительно регистрирует её у диспетчера
@@ -26,7 +34,7 @@ Session id — переменная окружения `$CLAUDE_CODE_SESSION_ID`
 остановился спросить/подтвердить у пользователя — вместо этого:
 1. Сформулируй вопрос текстом (варианты — просто перечисли в тексте,
    free-text ответ потом сам сопоставишь с вариантом).
-2. Отправь через `claude-delta send "$CLAUDE_CODE_SESSION_ID" "ВОПРОС"`.
+2. Отправь через `python -m claude_delta.cli send "ВОПРОС"`.
 3. Не вызывай `AskUserQuestion` — заверши ход. Если сессия
    зарегистрирована в tmux — диспетчер сам инжектирует ответ как
    очередной ввод в панель на следующем такте. Если не в tmux — ответ
@@ -91,7 +99,7 @@ Session id — переменная окружения `$CLAUDE_CODE_SESSION_ID`
 ```bash
 cd ~/work/claude-delta && source .venv/bin/activate
 export DELTA_STORE_DB="$HOME/work/claude-delta/bridge.sqlite3"
-python -m claude_delta.cli create-session "$CLAUDE_CODE_SESSION_ID" \
+python -m claude_delta.cli create-session \
   --name "ТЕМА_СЕССИИ" --message "ТЕМА_СЕССИИ"
 ```
 
@@ -99,7 +107,7 @@ python -m claude_delta.cli create-session "$CLAUDE_CODE_SESSION_ID" \
 промпты начнут форвардиться автоматически, доставка ответов тоже
 автоматическая, `/loop` не нужен):
 ```bash
-python -m claude_delta.cli register-tmux "$CLAUDE_CODE_SESSION_ID"
+python -m claude_delta.cli register-tmux
 ```
 Если `$TMUX` не установлена — сообщи, что permission-промпты форвардиться
 не будут (только явные вопросы через `send`), и что для полного режима
@@ -129,7 +137,7 @@ tmux-регистрации (для tmux-сессий диспетчер дос�
 ```bash
 cd ~/work/claude-delta && source .venv/bin/activate
 export DELTA_STORE_DB="$HOME/work/claude-delta/bridge.sqlite3"
-python -m claude_delta.cli check "$CLAUDE_CODE_SESSION_ID"
+python -m claude_delta.cli check
 ```
 Если пришли новые сообщения — обработай их как обычный ввод пользователя
 (в них может быть распознанный текст голосового, с префиксом
@@ -143,7 +151,7 @@ tmux-регистрацию, если она была:
 ```bash
 cd ~/work/claude-delta && source .venv/bin/activate
 export DELTA_STORE_DB="$HOME/work/claude-delta/bridge.sqlite3"
-python -m claude_delta.cli close "$CLAUDE_CODE_SESSION_ID"
+python -m claude_delta.cli close
 ```
 Группу не удаляй — пользователь чистит вручную, когда сам решит.
 Если в этой сессии был запущен `/loop ... /delta-chat check` — останови
@@ -155,8 +163,9 @@ python -m claude_delta.cli close "$CLAUDE_CODE_SESSION_ID"
 сообщения (в отличие от `check`), просто смотрит состояние:
 ```bash
 systemctl --user is-active claude-delta-daemon.service
-sqlite3 "$HOME/work/claude-delta/bridge.sqlite3" \
-  "SELECT status, chat_id, tmux_target FROM sessions WHERE session_id='$CLAUDE_CODE_SESSION_ID';"
+cd ~/work/claude-delta && source .venv/bin/activate
+export DELTA_STORE_DB="$HOME/work/claude-delta/bridge.sqlite3"
+python -m claude_delta.cli status
 ```
 
 После каждого действия — коротко сообщи результат.

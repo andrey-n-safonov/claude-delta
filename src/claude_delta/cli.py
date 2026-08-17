@@ -4,15 +4,23 @@ CLI for the Claude Code session: talks only to the sqlite drop-box
 (daemon.py).
 
 Commands:
-  create-session <session_id> [--name NAME] [--message TEXT]  -> prints chat_id
-  register-tmux <session_id> [--target TARGET]  -> prints target (defaults
+  create-session [session_id] [--name NAME] [--message TEXT]  -> prints chat_id
+  register-tmux [session_id] [--target TARGET]  -> prints target (defaults
       to $TMUX_PANE) — turns on the tmux dispatcher for the session:
       permission prompts get forwarded to the chat, replies get injected
       back via tmux send-keys, without any action from the session's code
       (see daemon.py, _process_tmux_prompts/_process_tmux_delivery)
-  send <session_id> <text>
-  check <session_id>                          -> prints new messages (JSON lines)
-  close <session_id>
+  send [session_id] <text>
+  check [session_id]                          -> prints new messages (JSON lines)
+  close [session_id]
+
+session_id is optional everywhere and defaults to $CLAUDE_CODE_SESSION_ID
+(see _session_id()) — deliberately, so the Claude Code caller never has
+to spell the variable out as a shell expansion in the command it runs;
+a literal "$CLAUDE_CODE_SESSION_ID" in the command text makes Claude
+Code's permission classifier prompt every time no matter how the Bash
+allowlist is set up, since the substituted value isn't known until
+execution.
 
 A new Delta Chat group chat stays "unpromoted" (invisible to the peer)
 until at least one message has been sent — so create-session without
@@ -31,8 +39,29 @@ DB_PATH = os.environ.get("DELTA_STORE_DB", "./bridge.sqlite3")
 REQUEST_TIMEOUT_SEC = 20
 
 
+def _session_id(args):
+    """session_id positional arg, falling back to $CLAUDE_CODE_SESSION_ID.
+
+    The fallback matters beyond convenience: a literal "$CLAUDE_CODE_SESSION_ID"
+    in the shell command is a variable expansion, which Claude Code's
+    permission classifier never blanket-approves via a Bash prefix allow
+    rule (the substituted value is unknown at match time) — every call
+    prompts for confirmation regardless of allowlisting. Omitting the arg
+    and letting the CLI read the already-inherited env var itself keeps
+    the command a plain literal that a prefix rule can match cleanly.
+    """
+    sid = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print(
+            "session_id не передан и $CLAUDE_CODE_SESSION_ID не установлена",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return sid
+
+
 def cmd_create_session(args):
-    session_id = args.session_id
+    session_id = _session_id(args)
     name = args.name or f"Claude Code — {session_id}"
 
     existing = store.get_session(DB_PATH, session_id)
@@ -76,7 +105,8 @@ def cmd_create_session(args):
 
 
 def cmd_register_tmux(args):
-    sess = store.get_session(DB_PATH, args.session_id)
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
     if not sess:
         print("нет такой сессии — сначала create-session", file=sys.stderr)
         return 1
@@ -88,42 +118,55 @@ def cmd_register_tmux(args):
             file=sys.stderr,
         )
         return 1
-    store.register_tmux(DB_PATH, args.session_id, target)
+    store.register_tmux(DB_PATH, session_id, target)
     print(target)
     return 0
 
 
 def cmd_send(args):
-    sess = store.get_session(DB_PATH, args.session_id)
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
     if not sess:
         print("нет такой сессии — сначала create-session", file=sys.stderr)
         return 1
-    store.enqueue_outbox(DB_PATH, args.session_id, sess["chat_id"], args.text)
+    store.enqueue_outbox(DB_PATH, session_id, sess["chat_id"], args.text)
     return 0
 
 
 def cmd_check(args):
-    sess = store.get_session(DB_PATH, args.session_id)
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
     if not sess:
         print("нет такой сессии", file=sys.stderr)
         return 1
-    msgs = store.fetch_unconsumed(DB_PATH, args.session_id, sess["chat_id"])
+    msgs = store.fetch_unconsumed(DB_PATH, session_id, sess["chat_id"])
     for m in msgs:
         print(json.dumps({"text": m["text"], "received_at": m["received_at"]}, ensure_ascii=False))
     return 0
 
 
+def cmd_status(args):
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
+    if not sess:
+        print("нет такой сессии", file=sys.stderr)
+        return 1
+    print(f"status={sess['status']} chat_id={sess['chat_id']} tmux_target={sess.get('tmux_target')}")
+    return 0
+
+
 def cmd_close(args):
-    sess = store.get_session(DB_PATH, args.session_id)
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
     if not sess:
         print("нет такой сессии", file=sys.stderr)
         return 1
     store.enqueue_outbox(
-        DB_PATH, args.session_id, sess["chat_id"],
+        DB_PATH, session_id, sess["chat_id"],
         "— сессия неактивна, дальше сюда можно не писать —",
     )
-    store.disarm_session(DB_PATH, args.session_id)
-    store.clear_tmux(DB_PATH, args.session_id)  # dispatcher stops touching the pane
+    store.disarm_session(DB_PATH, session_id)
+    store.clear_tmux(DB_PATH, session_id)  # dispatcher stops touching the pane
     return 0
 
 
@@ -132,28 +175,38 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("create-session")
-    p.add_argument("session_id")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("--name")
     p.add_argument("--message", help="первое сообщение — без него чат не появится у собеседника")
     p.set_defaults(func=cmd_create_session)
 
     p = sub.add_parser("register-tmux")
-    p.add_argument("session_id")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("--target", help="tmux pane-id, по умолчанию $TMUX_PANE")
     p.set_defaults(func=cmd_register_tmux)
 
     p = sub.add_parser("send")
-    p.add_argument("session_id")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("text")
     p.set_defaults(func=cmd_send)
 
     p = sub.add_parser("check")
-    p.add_argument("session_id")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("close")
-    p.add_argument("session_id")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.set_defaults(func=cmd_close)
+
+    p = sub.add_parser("status")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
+    p.set_defaults(func=cmd_status)
 
     args = parser.parse_args()
     sys.exit(args.func(args))
