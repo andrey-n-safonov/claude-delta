@@ -69,6 +69,17 @@ _running = True
 # a daemon restart just costs one extra stability-wait cycle, harmless.
 _pending_prompt_hash: dict[str, str] = {}
 
+# session_ids where the *previous* poll saw neither shape (prompt nor
+# limit banner) but a hash was still on record, so the clear hasn't been
+# confirmed yet — mirrors _pending_prompt_hash's stability guard, but for
+# the opposite transition. Without this, a single blank render frame
+# between two polls of the *same still-open* prompt (tmux redraw/scroll
+# racing the capture) got read as "resolved", and the prompt reappearing
+# next poll then looked brand new and got re-forwarded — confirmed from
+# logs 2026-08-20: chat 26 forwarded an identical #773636 prompt three
+# times in ~90s (reliability pass 2026-08-27).
+_pending_clear: set[str] = set()
+
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
@@ -149,6 +160,7 @@ def _clear_pane_state(db_path: str, session_id: str):
     store.clear_tmux(db_path, session_id)
     _pending_prompt_hash.pop(f"{session_id}:last_prompt_hash", None)
     _pending_prompt_hash.pop(f"{session_id}:last_limit_hash", None)
+    _pending_clear.discard(session_id)
 
 
 def _process_tmux_prompts(db_path: str):
@@ -184,6 +196,11 @@ def _process_tmux_prompts(db_path: str):
         # clobbered by the prompt's and got re-sent every time the prompt
         # cleared (reliability pass 2026-08-10).
         if is_permission_prompt(text):
+            # Whatever transient blank frame may have been on record
+            # (the pane clearly shows a prompt right now) is moot —
+            # discard it so a later real blank frame gets its own full
+            # two-poll confirmation instead of inheriting this one.
+            _pending_clear.discard(session_id)
             hash_field = "last_prompt_hash"
             # Hashing extract_context (includes the command/tool detail),
             # not just the cursor-line-onward tail — two different Bash
@@ -197,20 +214,35 @@ def _process_tmux_prompts(db_path: str):
             hash_source = extract_context(text)
             forward_text = format_for_chat(text)
         elif is_limit_notice(text):
+            _pending_clear.discard(session_id)
             hash_field = "last_limit_hash"
             hash_source = extract_limit_notice(text)
             forward_text = format_limit_notice(text)
         else:
             # Neither shape is showing — whatever was last known is
-            # resolved (by *some* means, not necessarily our own
-            # injection, e.g. answered directly at the keyboard). Stale
-            # "still waiting" state otherwise breaks the next distinct
-            # occurrence's dedup and misleads delivery-time decisions.
+            # *probably* resolved (by *some* means, not necessarily our
+            # own injection, e.g. answered directly at the keyboard).
+            # Stale "still waiting" state otherwise breaks the next
+            # distinct occurrence's dedup and misleads delivery-time
+            # decisions. But a single blank poll is exactly as unreliable
+            # here as it is for a freshly-appearing prompt (mid-render
+            # capture, tmux redraw/scroll) — clearing on it immediately
+            # made the *same* still-open prompt look brand new the
+            # moment it reappeared next poll, and get re-forwarded
+            # (confirmed 2026-08-20, see _pending_clear's docstring). So
+            # this needs the same two-poll confirmation _pending_prompt_hash
+            # already gives new prompts, just for the opposite transition.
             if sess.get("last_prompt_hash") or sess.get("last_limit_hash"):
-                store.set_last_prompt_hash(db_path, session_id, None)
-                store.set_last_limit_hash(db_path, session_id, None)
-            _pending_prompt_hash.pop(f"{session_id}:last_prompt_hash", None)
-            _pending_prompt_hash.pop(f"{session_id}:last_limit_hash", None)
+                if session_id in _pending_clear:
+                    store.set_last_prompt_hash(db_path, session_id, None)
+                    store.set_last_limit_hash(db_path, session_id, None)
+                    _pending_prompt_hash.pop(f"{session_id}:last_prompt_hash", None)
+                    _pending_prompt_hash.pop(f"{session_id}:last_limit_hash", None)
+                    _pending_clear.discard(session_id)
+                else:
+                    _pending_clear.add(session_id)
+            else:
+                _pending_clear.discard(session_id)
             continue
 
         h = _hash_text(hash_source)
