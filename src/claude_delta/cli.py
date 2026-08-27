@@ -35,7 +35,20 @@ import time
 
 from . import store
 
-DB_PATH = os.environ.get("DELTA_STORE_DB", "./bridge.sqlite3")
+# Absolute default, not "./bridge.sqlite3" — this is the one fixed
+# deployment path on every host (see INSTALL.md), and depending on cwd
+# meant every invocation needed `cd ~/work/claude-delta` first, which in
+# turn meant `source .venv/bin/activate` to get `python`/`claude-delta`
+# resolving to the venv, which in turn meant a 3-line cd+source+export
+# compound command — and `source` gets specially flagged by Claude Code's
+# permission classifier ("evaluates arguments as shell code") regardless
+# of any allow-list entry, so `send` never stopped prompting for
+# confirmation no matter how the allowlist was set up (confirmed live
+# 2026-08-27, see docs/design.md). Calling the venv's own `claude-delta`
+# console script directly (absolute path, or PATH-symlinked — see
+# deploy/commands/delta-chat.md) needs neither cd nor source nor export;
+# DELTA_STORE_DB is still honored if some other deployment ever needs it.
+DB_PATH = os.environ.get("DELTA_STORE_DB", os.path.expanduser("~/work/claude-delta/bridge.sqlite3"))
 REQUEST_TIMEOUT_SEC = 20
 
 
