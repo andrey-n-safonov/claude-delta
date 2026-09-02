@@ -22,7 +22,7 @@ import signal
 import sys
 import time
 
-from . import sleepinhibit, store, stt, tmux
+from . import ocr, sleepinhibit, store, stt, tmux
 from .bridge import Bridge
 from .prompt_detect import (
     extract_context,
@@ -34,6 +34,7 @@ from .prompt_detect import (
 )
 
 VOICE_VIEW_TYPES = {"Voice", "Audio"}
+IMAGE_VIEW_TYPES = {"Image", "Sticker"}
 
 LOOP_INTERVAL_SEC = 5
 FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
@@ -140,6 +141,15 @@ def _process_inbox(bridge: Bridge, db_path: str):
             except Exception:
                 log.exception("сессия %s: ошибка распознавания msg_id=%s", sess["session_id"], msg["id"])
                 text = "[голосовое — распознать не удалось]"
+        elif msg["view_type"] in IMAGE_VIEW_TYPES and msg["file"]:
+            caption = msg["text"].strip() if msg["text"] else ""
+            try:
+                recognized = ocr.recognize(msg["file"])
+                body = " — ".join(p for p in (caption, recognized) if p) or "текст не найден"
+            except Exception:
+                log.exception("сессия %s: ошибка OCR msg_id=%s", sess["session_id"], msg["id"])
+                body = f"{caption} (распознать не удалось)" if caption else "распознать не удалось"
+            text = f"[изображение] {body}"
         store.store_inbox_message(db_path, chat_id, msg["id"], text)
         log.info("сессия %s: новое сообщение (msg_id=%s) %r", sess["session_id"], msg["id"], text[:60])
         processed_by_chat.setdefault(chat_id, []).append(msg["id"])
