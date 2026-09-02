@@ -127,24 +127,56 @@ _CHAT_HEADER = "🔐 Подтверждение действия"
 # from by replying with a number.
 _CURSOR_GLYPH_RE = re.compile(r"[❯>]\s*(?=[1-9]\.)")
 
+# AskUserQuestion's own harness chrome, not part of the question the user
+# wrote — auto-appended after every declared option (calibrated live
+# 2026-09-02, see design.md "Многовопросные опросы"). A bare digit reply
+# can't drive either meaningfully: "Type something." opens a free-text
+# field the phone reply would land in verbatim (not a selection), "Chat
+# about this" drops the structured flow entirely. Phrase-matched rather
+# than structural like the rest of this file (same tradeoff as
+# _LIMIT_PHRASES below) — this is fixed harness UI text, not
+# locale-varying dialog wording, and there's no structural signal that
+# reliably separates it from a genuine option otherwise.
+_META_OPTION_RE = re.compile(r"^\s*[❯>]?\s*[1-9]\.\s+(Type something\.|Chat about this)\s*$")
+
 
 def format_for_chat(text: str) -> str:
     """extract_context() output, reshaped for a chat audience: cursor
     glyph stripped from the option lines (there's nothing to be "the
     currently selected option" over chat — just a plain list), the
     trailing key-hint line dropped (its keys — Esc, Tab — don't apply to
-    a phone typing a reply), and a header so the message reads as a
-    permission request at a glance instead of blending in with ordinary
-    status updates."""
+    a phone typing a reply), AskUserQuestion's own meta-options dropped
+    (see _META_OPTION_RE — a digit reply can't drive them, showing them
+    numbered alongside real choices just invites tapping one by mistake),
+    and a header so the message reads as a permission request at a glance
+    instead of blending in with ordinary status updates."""
     body = extract_context(text)
     lines = body.splitlines()
 
+    # Hint-line trim first, on the untouched option list — it counts on
+    # the *last* option line having no description under it (true here:
+    # "Chat about this", the real last option before any meta-cut, is
+    # always a bare one-liner). Doing the meta-cut first would instead
+    # land this on an earlier option that may have a multi-line
+    # description of its own, truncating it by mistake.
     last_option = None
     for i, line in enumerate(lines):
         if _OPTION_LINE_RE.match(line):
             last_option = i
     if last_option is not None:
         lines = lines[: last_option + 1]  # drop the hint line(s) after it
+
+    # Now drop AskUserQuestion's own meta-options (and, incidentally, the
+    # rule line between them) — on the already hint-trimmed list, so this
+    # cut lands exactly at the meta option's own line without disturbing
+    # anything before it.
+    meta_cut = None
+    for i, line in enumerate(lines):
+        if _META_OPTION_RE.match(line):
+            meta_cut = i
+            break
+    if meta_cut is not None:
+        lines = lines[:meta_cut]
 
     # Stripping just the cursor glyph leaves the option it marked one
     # column shorter than the others ("❯ 1." -> " 1." vs "  2.") —
