@@ -104,6 +104,27 @@ def run():
     if any(p["id"] == ok_id for p in store.pending_outbox(db)):
         failures.append("pending_outbox re-offered an already-sent message")
 
+    # --- renames: same contract as outbox (queue, apply-once, backoff) ---
+    db = _fresh_db()
+    rename_id = store.enqueue_rename(db, "s1", chat_id=9, name="Новая тема")
+    pending = store.pending_renames(db)
+    if [p["id"] for p in pending] != [rename_id] or pending[0]["name"] != "Новая тема":
+        failures.append(f"pending_renames did not return the enqueued rename: {pending}")
+    store.mark_rename_applied(db, rename_id)
+    if any(p["id"] == rename_id for p in store.pending_renames(db)):
+        failures.append("pending_renames re-offered an already-applied rename")
+
+    db = _fresh_db()
+    err_id = store.enqueue_rename(db, "s1", chat_id=9, name="Тема")
+    for _ in range(store.RENAME_MAX_ATTEMPTS):
+        pending = store.pending_renames(db)
+        if not any(p["id"] == err_id for p in pending):
+            failures.append("pending_renames dropped the rename before it hit RENAME_MAX_ATTEMPTS")
+            break
+        store.mark_rename_error(db, err_id, "simulated failure")
+    if any(p["id"] == err_id for p in store.pending_renames(db)):
+        failures.append("pending_renames kept retrying past RENAME_MAX_ATTEMPTS")
+
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:

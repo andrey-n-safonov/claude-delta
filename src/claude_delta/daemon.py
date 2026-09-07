@@ -104,6 +104,17 @@ def _process_session_requests(bridge: Bridge, db_path: str):
             log.exception("сессия %s: ошибка создания чата", session_id)
 
 
+def _process_renames(bridge: Bridge, db_path: str):
+    for item in store.pending_renames(db_path):
+        try:
+            bridge.rename_chat(item["chat_id"], item["name"])
+            store.mark_rename_applied(db_path, item["id"])
+            log.info("сессия %s: чат %s переименован в %r", item["session_id"], item["chat_id"], item["name"])
+        except Exception as e:
+            store.mark_rename_error(db_path, item["id"], repr(e))
+            log.exception("rename #%s: ошибка переименования", item["id"])
+
+
 def _process_outbox(bridge: Bridge, db_path: str):
     for item in store.pending_outbox(db_path):
         try:
@@ -381,6 +392,7 @@ def run():
         while _running:
             try:
                 _process_session_requests(bridge, db_path)
+                _process_renames(bridge, db_path)
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)
                 _process_inbox(bridge, db_path)

@@ -11,6 +11,7 @@ Commands:
       back via tmux send-keys, without any action from the session's code
       (see daemon.py, _process_tmux_prompts/_process_tmux_delivery)
   send [session_id] <text>
+  rename [session_id] <name>                   -> renames the group chat (session topic changed)
   check [session_id]                          -> prints new messages (JSON lines)
   close [session_id]
 
@@ -146,6 +147,16 @@ def cmd_send(args):
     return 0
 
 
+def cmd_rename(args):
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
+    if not sess:
+        print("нет такой сессии — сначала create-session", file=sys.stderr)
+        return 1
+    store.enqueue_rename(DB_PATH, session_id, sess["chat_id"], args.name)
+    return 0
+
+
 def cmd_check(args):
     session_id = _session_id(args)
     sess = store.get_session(DB_PATH, session_id)
@@ -205,6 +216,12 @@ def main():
                     help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("text")
     p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser("rename")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
+    p.add_argument("name", help="новое имя группового чата — текущая тема сессии")
+    p.set_defaults(func=cmd_rename)
 
     p = sub.add_parser("check")
     p.add_argument("session_id", nargs="?", default=None,

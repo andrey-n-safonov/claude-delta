@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS inbox (
     received_at REAL NOT NULL,
     consumed_by TEXT
 );
+
+CREATE TABLE IF NOT EXISTS renames (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -353,5 +364,44 @@ def mark_consumed(db_path: str, consumer: str, msg_ids: list[int]) -> None:
         conn.executemany(
             "UPDATE inbox SET consumed_by = ? WHERE id = ? AND consumed_by IS NULL",
             [(consumer, i) for i in msg_ids],
+        )
+        conn.commit()
+
+
+# --- Renames (CLI -> daemon): group chat title = current session topic ---
+
+def enqueue_rename(db_path: str, session_id: str, chat_id: int, name: str) -> int:
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO renames (session_id, chat_id, name, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, chat_id, name, time.time()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+RENAME_MAX_ATTEMPTS = 5  # same bound as outbox — see mark_outbox_error
+
+
+def pending_renames(db_path: str):
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM renames WHERE applied = 0 AND attempts < ?",
+            (RENAME_MAX_ATTEMPTS,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_rename_applied(db_path: str, rename_id: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute("UPDATE renames SET applied = 1 WHERE id = ?", (rename_id,))
+        conn.commit()
+
+
+def mark_rename_error(db_path: str, rename_id: int, error: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE renames SET error = ?, attempts = attempts + 1 WHERE id = ?",
+            (error, rename_id),
         )
         conn.commit()

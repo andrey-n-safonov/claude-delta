@@ -134,6 +134,10 @@ class Bridge:
         msg = chat.send_text(text)
         return msg.id
 
+    def rename_chat(self, chat_id: int, name: str) -> None:
+        chat = self._account.get_chat_by_id(chat_id)
+        chat.set_name(name)
+
     DC_STATE_IN_FRESH = 10
 
     def fetch_all_fresh_messages(self):
