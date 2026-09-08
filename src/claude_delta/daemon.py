@@ -18,6 +18,7 @@ scheduler silently got stuck (see docs/design.md in the vault).
 import hashlib
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -38,6 +39,16 @@ IMAGE_VIEW_TYPES = {"Image", "Sticker"}
 
 LOOP_INTERVAL_SEC = 5
 FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
+
+# /mode <target> — a chat command the daemon handles itself, never typed
+# into the pane as a regular message (see _process_mode_commands). Only
+# an explicit slash-command is recognized, deliberately not free-form
+# text like "switch to manual": the daemon has no NLU, and matching
+# loosely (bare "auto"/"manual" words) risks firing on an ordinary chat
+# reply that happens to contain one.
+_MODE_COMMAND_RE = re.compile(r"^/mode\s+(\S+)\s*$", re.IGNORECASE)
+_MODE_ALIASES = {"accept-edits": "auto", "acceptedits": "auto", "bypass": "auto"}
+MODE_CYCLE_MAX_PRESSES = 6  # one full lap of the (3-state, but observed non-deterministic) ring, plus margin
 
 # Sent as its own injected line right after every delivered batch (never
 # merged into the delivered text itself — that stays verbatim, see
@@ -302,6 +313,61 @@ def _process_tmux_prompts(db_path: str):
 # the cursor happens to be. What the session does with any given turn
 # (mirror a reply back to the chat, stay quiet, etc.) is entirely
 # delta-chat.md's judgment call — no code-side tagging or nudging.
+def _process_mode_commands(db_path: str):
+    """Intercepts /mode <target> chat messages before regular tmux
+    delivery would type them into the pane as a normal message — handled
+    entirely here instead, via tmux.cycle_to_mode(), and answered with a
+    chat reply (never injected into the pane).
+
+    This exists specifically to keep the running Claude Code session out
+    of the loop: a session pressing Shift-Tab itself and landing mid-ring
+    on Plan Mode gets gated by the harness on its very next tool call,
+    turning one mode switch into an expensive forced ExitPlanMode
+    round-trip (confirmed live, repeatedly, 2026-09-08 — see journal).
+    The daemon is a plain process with no such gate; tmux.cycle_to_mode()
+    can press through Plan Mode as many times as it needs and only ever
+    reports the final state once it's done, so the session's next tool
+    call (whenever that happens) sees a settled mode, never a transient
+    one, regardless of what the ring did in between."""
+    for sess in store.armed_sessions(db_path):
+        target = sess.get("tmux_target")
+        if not target:
+            continue
+        session_id, chat_id = sess["session_id"], sess["chat_id"]
+
+        msgs = store.peek_unconsumed(db_path, chat_id)
+        if not msgs:
+            continue
+        if not tmux.pane_alive(target):
+            continue  # _process_tmux_prompts/_process_tmux_delivery already log+clear this
+
+        for m in msgs:
+            match = _MODE_COMMAND_RE.match(m["text"].strip())
+            if not match:
+                continue
+            requested = match.group(1).lower()
+            want = _MODE_ALIASES.get(requested, requested)
+            if want not in ("manual", "auto", "plan"):
+                reply = f"не знаю режим {requested!r} — есть manual, auto, plan"
+                reached = None
+            else:
+                try:
+                    reached = tmux.cycle_to_mode(target, want, max_presses=MODE_CYCLE_MAX_PRESSES)
+                except Exception:
+                    log.exception("сессия %s: ошибка cycle_to_mode(%s)", session_id, want)
+                    reached = None
+                reply = (
+                    f"режим: {reached}" if reached == want
+                    else f"не дожал до {want} за {MODE_CYCLE_MAX_PRESSES} попыток, сейчас: {reached}"
+                )
+            # A distinct consumer tag, same reasoning as
+            # dispatcher:<session_id> in _process_tmux_delivery — this
+            # message must not also be typed into the pane by that path.
+            store.mark_consumed(db_path, f"mode-command:{session_id}", [m["id"]])
+            store.enqueue_outbox(db_path, session_id, chat_id, reply)
+            log.info("сессия %s: /mode %s -> %s", session_id, requested, reached)
+
+
 def _process_tmux_delivery(db_path: str):
     """Injects Delta Chat replies directly into the tmux pane — replaces
     the in-session /loop poll entirely for tmux-registered sessions.
@@ -396,6 +462,7 @@ def run():
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)
                 _process_inbox(bridge, db_path)
+                _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
                 _process_tmux_delivery(db_path)  # consumes what _process_inbox stored above
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:

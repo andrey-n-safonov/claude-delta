@@ -14,6 +14,8 @@ Commands:
   rename [session_id] <name>                   -> renames the group chat (session topic changed)
   cycle-mode [session_id]                     -> presses Shift-Tab in the session's tmux pane
       (the harness's own permission-mode cycle), prints the resulting status line
+  set-mode [session_id] <manual|auto|plan>    -> presses Shift-Tab repeatedly (bounded) until
+      that mode is reached, prints the mode actually reached (exit 1 if it never got there)
   check [session_id]                          -> prints new messages (JSON lines)
   close [session_id]
 
@@ -188,6 +190,35 @@ def cmd_cycle_mode(args):
     return 0
 
 
+def cmd_set_mode(args):
+    """Like cycle-mode, but drives tmux.cycle_to_mode() (multi-press,
+    self-correcting) instead of a single Shift-Tab — for a session that
+    knows exactly which mode it wants (manual/auto/plan), not just "cycle
+    once and see". Prefer this over cycle-mode for anything session-
+    initiated (e.g. working around the auto-mode classifier — see
+    delta-chat.md): a single cycle-mode press can land on Plan Mode,
+    which then gates the session's very next tool call regardless of
+    what it was; set-mode keeps pressing (bounded) until the target is
+    actually reached, all inside this one Bash invocation, before ever
+    handing control back."""
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
+    if not sess:
+        print("нет такой сессии — сначала create-session", file=sys.stderr)
+        return 1
+    target = sess.get("tmux_target")
+    if not target:
+        print("сессия не зарегистрирована в tmux — сначала register-tmux", file=sys.stderr)
+        return 1
+    want = args.target.lower()
+    if want not in ("manual", "auto", "plan"):
+        print(f"неизвестный режим {want!r} — есть manual, auto, plan", file=sys.stderr)
+        return 1
+    reached = tmux.cycle_to_mode(target, want)
+    print(reached or "неизвестно")
+    return 0 if reached == want else 1
+
+
 def cmd_check(args):
     session_id = _session_id(args)
     sess = store.get_session(DB_PATH, session_id)
@@ -258,6 +289,12 @@ def main():
     p.add_argument("session_id", nargs="?", default=None,
                     help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.set_defaults(func=cmd_cycle_mode)
+
+    p = sub.add_parser("set-mode")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
+    p.add_argument("target", help="manual | auto | plan")
+    p.set_defaults(func=cmd_set_mode)
 
     p = sub.add_parser("check")
     p.add_argument("session_id", nargs="?", default=None,

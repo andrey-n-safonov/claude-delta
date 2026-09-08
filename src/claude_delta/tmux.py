@@ -12,8 +12,20 @@ required.
 """
 import logging
 import subprocess
+import time
 
 log = logging.getLogger("claude_delta.tmux")
+
+# Substrings of the harness's own status line, one per permission mode it
+# cycles through via Shift-Tab. "accept edits on" vs "auto mode on" are
+# treated as the same target — observed live (2026-09-08) that which text
+# appears seems to depend on how the mode was entered, not on two actually
+# different access levels.
+_MODE_MARKERS = {
+    "manual": ("manual mode on",),
+    "auto": ("accept edits on", "auto mode on", "bypass permissions"),
+    "plan": ("plan mode on",),
+}
 
 
 def capture_pane(target: str) -> str:
@@ -56,6 +68,51 @@ def cycle_permission_mode(target: str) -> None:
     one physically can't do anything but press Shift-Tab, regardless of
     what triggered the call."""
     subprocess.run(["tmux", "send-keys", "-t", target, "BTab"], check=True)
+
+
+def _parse_mode(pane_tail: str) -> str | None:
+    """Pure string-matching over the last few lines of a captured pane —
+    split out from current_mode() so it's unit-testable without an actual
+    tmux process (see tests/test_tmux.py)."""
+    lowered = pane_tail.lower()
+    for mode, markers in _MODE_MARKERS.items():
+        if any(marker in lowered for marker in markers):
+            return mode
+    return None
+
+
+def current_mode(target: str) -> str | None:
+    """Current permission mode, read from the pane's status line — pure
+    observation, no keys pressed. None if the status line isn't showing
+    any of the known markers (harness version drift, or the line scrolled
+    out of the captured tail)."""
+    tail = "\n".join(capture_pane(target).rstrip().splitlines()[-3:])
+    return _parse_mode(tail)
+
+
+def cycle_to_mode(target: str, want: str, max_presses: int = 6) -> str | None:
+    """Presses Shift-Tab until current_mode() reports `want`, or gives up
+    after max_presses (one full lap of the ring is 3; 6 gives margin for
+    the ring's observed non-determinism — see design.md/journal
+    2026-09-08). Runs entirely in the daemon process, outside any Claude
+    Code tool-call boundary — the whole point of moving this here instead
+    of leaving it to the session's own cycle-mode: a session pressing
+    itself past Plan Mode mid-cycle still gets gated by it on its very
+    next tool call (confirmed live, several costly round-trips), while
+    this loop's intermediate presses are invisible to that gate — nothing
+    about them is a session tool call at all.
+
+    Returns the mode actually reached (which may not equal `want`, if
+    max_presses ran out) so the caller can report accurately instead of
+    assuming success."""
+    mode = current_mode(target)
+    for _ in range(max_presses):
+        if mode == want:
+            return mode
+        cycle_permission_mode(target)
+        time.sleep(0.4)
+        mode = current_mode(target)
+    return mode
 
 
 def pane_alive(target: str) -> bool:
