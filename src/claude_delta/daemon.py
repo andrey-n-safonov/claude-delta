@@ -350,6 +350,19 @@ def _process_mode_commands(db_path: str):
             if want not in ("manual", "auto", "plan"):
                 reply = f"не знаю режим {requested!r} — есть manual, auto, plan"
                 reached = None
+            elif is_permission_prompt(tmux.capture_pane(target)):
+                # Found live 2026-09-08: pressing Shift-Tab while a Y/N
+                # permission prompt is showing overwrites the status
+                # line with the prompt itself — cycle_to_mode's parser
+                # sees neither manual/auto/plan text at all and burns
+                # every attempt returning None, and what Shift-Tab
+                # actually does to an *open* prompt's own key handling is
+                # unknown (could silently pick an option) — not worth
+                # risking. Refuse instead of pressing blindly; the user
+                # resolves the prompt (through the forwarded prompt
+                # message itself) and just resends /mode.
+                reply = "сейчас открыт permission-промпт — сначала ответь на него, потом снова /mode"
+                reached = None
             else:
                 try:
                     reached = tmux.cycle_to_mode(target, want, max_presses=MODE_CYCLE_MAX_PRESSES)
