@@ -16,15 +16,19 @@ import time
 
 log = logging.getLogger("claude_delta.tmux")
 
-# Substrings of the harness's own status line, one per permission mode it
-# cycles through via Shift-Tab. "accept edits on" vs "auto mode on" are
-# treated as the same target — observed live (2026-09-08) that which text
-# appears seems to depend on how the mode was entered, not on two actually
-# different access levels.
+# Substrings of the harness's own status line, one per permission mode.
+# Four distinct modes, confirmed by a clean 6-press run (2026-09-08,
+# see journal) with the *correct* line read each time (an earlier pass
+# misread the pane — grabbed the header line instead of the status line
+# — and that bug is what made "accept edits" and "auto" look like the
+# same flickering label; they are not, the user caught this live). Fixed
+# ring order, Shift-Tab always moves forward:
+#   manual -> accept-edits -> plan -> auto -> manual -> ...
 _MODE_MARKERS = {
     "manual": ("manual mode on",),
-    "auto": ("accept edits on", "auto mode on", "bypass permissions"),
+    "accept-edits": ("accept edits on",),
     "plan": ("plan mode on",),
+    "auto": ("auto mode on", "bypass permissions"),
 }
 
 
@@ -92,10 +96,10 @@ def current_mode(target: str) -> str | None:
 
 def cycle_to_mode(target: str, want: str, max_presses: int = 6) -> str | None:
     """Presses Shift-Tab until current_mode() reports `want`, or gives up
-    after max_presses (one full lap of the ring is 3; 6 gives margin for
-    the ring's observed non-determinism — see design.md/journal
-    2026-09-08). Runs entirely in the daemon process, outside any Claude
-    Code tool-call boundary — the whole point of moving this here instead
+    after max_presses (one full lap of the 4-state ring is 4 presses
+    worst-case; 6 gives a bit of margin). Runs entirely in the daemon
+    process, outside any Claude Code tool-call boundary — the whole
+    point of moving this here instead
     of leaving it to the session's own cycle-mode: a session pressing
     itself past Plan Mode mid-cycle still gets gated by it on its very
     next tool call (confirmed live, several costly round-trips), while

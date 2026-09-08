@@ -23,9 +23,9 @@ def run():
 
     cases = [
         ("  ⏸ manual mode on · ← 1 agent", "manual"),
-        ("  ⏵⏵ accept edits on (shift+tab to cycle) · ← 1 agent", "auto"),
-        ("  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent", "auto"),
+        ("  ⏵⏵ accept edits on (shift+tab to cycle) · ← 1 agent", "accept-edits"),
         ("  ⏸ plan mode on (shift+tab to cycle) · ← 1 agent", "plan"),
+        ("  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent", "auto"),
         ("some unrelated pane content\nwith no status line at all", None),
         ("", None),
     ]

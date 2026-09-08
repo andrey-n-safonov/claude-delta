@@ -46,9 +46,14 @@ FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
 # text like "switch to manual": the daemon has no NLU, and matching
 # loosely (bare "auto"/"manual" words) risks firing on an ordinary chat
 # reply that happens to contain one.
+# Four distinct modes (confirmed live 2026-09-08, see journal — an
+# earlier version of this code wrongly merged "accept-edits" into
+# "auto", a misread of the pane that made two real, different
+# permission levels look like one flickering label). Ring order,
+# Shift-Tab always moves forward: manual -> accept-edits -> plan -> auto.
 _MODE_COMMAND_RE = re.compile(r"^/mode\s+(\S+)\s*$", re.IGNORECASE)
-_MODE_ALIASES = {"accept-edits": "auto", "acceptedits": "auto", "bypass": "auto"}
-MODE_CYCLE_MAX_PRESSES = 6  # one full lap of the (3-state, but observed non-deterministic) ring, plus margin
+_MODE_ALIASES = {"acceptedits": "accept-edits", "edits": "accept-edits", "bypass": "auto"}
+MODE_CYCLE_MAX_PRESSES = 6  # one full lap of the 4-state ring is 4, plus margin
 
 # Sent as its own injected line right after every delivered batch (never
 # merged into the delivered text itself — that stays verbatim, see
@@ -347,8 +352,8 @@ def _process_mode_commands(db_path: str):
                 continue
             requested = match.group(1).lower()
             want = _MODE_ALIASES.get(requested, requested)
-            if want not in ("manual", "auto", "plan"):
-                reply = f"не знаю режим {requested!r} — есть manual, auto, plan"
+            if want not in tmux._MODE_MARKERS:
+                reply = f"не знаю режим {requested!r} — есть {', '.join(tmux._MODE_MARKERS)}"
                 reached = None
             elif is_permission_prompt(tmux.capture_pane(target)):
                 # Found live 2026-09-08: pressing Shift-Tab while a Y/N

@@ -211,8 +211,8 @@ def cmd_set_mode(args):
         print("сессия не зарегистрирована в tmux — сначала register-tmux", file=sys.stderr)
         return 1
     want = args.target.lower()
-    if want not in ("manual", "auto", "plan"):
-        print(f"неизвестный режим {want!r} — есть manual, auto, plan", file=sys.stderr)
+    if want not in tmux._MODE_MARKERS:
+        print(f"неизвестный режим {want!r} — есть {', '.join(tmux._MODE_MARKERS)}", file=sys.stderr)
         return 1
     reached = tmux.cycle_to_mode(target, want)
     print(reached or "неизвестно")
