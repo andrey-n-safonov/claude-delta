@@ -45,6 +45,19 @@ def send_keys(target: str, text: str) -> None:
     subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True)
 
 
+def cycle_permission_mode(target: str) -> None:
+    """Presses Shift-Tab in the pane — the harness's own keybinding for
+    cycling its permission mode (manual/auto/plan/...). Deliberately a
+    single hardcoded key, not a generic "send any key" primitive: the
+    whole point of a remote chat channel is that its messages are data,
+    not commands, and a function that types free-form key names into
+    someone's terminal is exactly the kind of primitive that turns "data"
+    back into "commands" if the chat pipeline is ever compromised. This
+    one physically can't do anything but press Shift-Tab, regardless of
+    what triggered the call."""
+    subprocess.run(["tmux", "send-keys", "-t", target, "BTab"], check=True)
+
+
 def pane_alive(target: str) -> bool:
     """False if the pane was closed by hand — avoids crashes in the daemon loop."""
     result = subprocess.run(

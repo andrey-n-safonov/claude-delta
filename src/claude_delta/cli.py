@@ -12,6 +12,8 @@ Commands:
       (see daemon.py, _process_tmux_prompts/_process_tmux_delivery)
   send [session_id] <text>
   rename [session_id] <name>                   -> renames the group chat (session topic changed)
+  cycle-mode [session_id]                     -> presses Shift-Tab in the session's tmux pane
+      (the harness's own permission-mode cycle), prints the resulting status line
   check [session_id]                          -> prints new messages (JSON lines)
   close [session_id]
 
@@ -34,7 +36,7 @@ import os
 import sys
 import time
 
-from . import store
+from . import store, tmux
 
 # Absolute default, not "./bridge.sqlite3" — this is the one fixed
 # deployment path on every host (see INSTALL.md), and depending on cwd
@@ -157,6 +159,35 @@ def cmd_rename(args):
     return 0
 
 
+def cmd_cycle_mode(args):
+    """Presses Shift-Tab in the session's own pane — the harness's own
+    keybinding for cycling its permission mode. Needs a tmux
+    registration (the pane to press the key in); doesn't need the
+    session to be armed in Delta Chat at all, this never touches the
+    outbox/daemon — see tmux.cycle_permission_mode's docstring for why
+    it's a single hardcoded key rather than a generic "send any key"
+    primitive.
+
+    Prints the pane's tail after pressing so the caller can read off the
+    resulting mode line itself — a cycle is relative (there's no "set to
+    exactly X" keybinding), so whoever asked for a specific mode has to
+    look at the result and press again if it didn't land there."""
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
+    if not sess:
+        print("нет такой сессии — сначала create-session", file=sys.stderr)
+        return 1
+    target = sess.get("tmux_target")
+    if not target:
+        print("сессия не зарегистрирована в tmux — сначала register-tmux", file=sys.stderr)
+        return 1
+    tmux.cycle_permission_mode(target)
+    time.sleep(0.3)  # let the harness redraw the status line before we capture it
+    tail = tmux.capture_pane(target).rstrip().splitlines()[-3:]
+    print("\n".join(tail))
+    return 0
+
+
 def cmd_check(args):
     session_id = _session_id(args)
     sess = store.get_session(DB_PATH, session_id)
@@ -222,6 +253,11 @@ def main():
                     help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("name", help="новое имя группового чата — текущая тема сессии")
     p.set_defaults(func=cmd_rename)
+
+    p = sub.add_parser("cycle-mode")
+    p.add_argument("session_id", nargs="?", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
+    p.set_defaults(func=cmd_cycle_mode)
 
     p = sub.add_parser("check")
     p.add_argument("session_id", nargs="?", default=None,
