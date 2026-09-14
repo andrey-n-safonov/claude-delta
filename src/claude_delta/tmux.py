@@ -136,6 +136,33 @@ def spawn_window(command: str, session: str = "main") -> str:
     return result.stdout.strip()
 
 
+def wait_ready(target: str, timeout_sec: float = 20.0, poll_interval_sec: float = 0.5) -> bool:
+    """Polls current_mode(target) until the harness's own status line
+    shows a known permission-mode marker — the signal that its TUI has
+    finished starting and switched stdin to raw mode, i.e. it is actually
+    reading keystrokes now, not just that the pty exists.
+
+    Used right after spawn_window(), before typing the first message into
+    a brand-new pane (see daemon._handle_new_command). A blind sleep
+    before this guessed at startup latency instead of observing it —
+    unmeasured MCP-server spawn alone took ~1s in a live session, total
+    time to a ready prompt is unknown and probably differs by backend
+    (each wrapper does its own proxy/env setup before even exec'ing
+    `claude`, see claude-deep/claude-mimo).
+
+    Returns False on timeout — pane may still be starting, or never will
+    (wrong API key, network down for that backend) — rather than
+    guessing further; the caller decides what to do instead of typing
+    into a pane nobody is reading yet.
+    """
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if current_mode(target) is not None:
+            return True
+        time.sleep(poll_interval_sec)
+    return False
+
+
 def pane_alive(target: str) -> bool:
     """False if the pane was closed by hand — avoids crashes in the daemon loop."""
     result = subprocess.run(

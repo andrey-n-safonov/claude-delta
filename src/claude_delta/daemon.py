@@ -8,6 +8,16 @@ Configuration — environment variables:
   DELTA_PEER_ADDR             — user's address (personal account)
   DELTA_ACCOUNTS_DIR          — where deltachat-core keeps its own db
   DELTA_STORE_DB              — path to the drop-box sqlite (store.py)
+  DELTA_SPAWN_BACKENDS        — control-chat "/new" backends, "name=cmd,..."
+                                 (default: proxy=claude-proxy,deep=claude-deep,
+                                 mimo=claude-mimo — this deployment's own
+                                 wrapper scripts, override or clear for another)
+  DELTA_SPAWN_TMUX_SESSION    — tmux session "/new" opens windows in (default: main)
+  DELTA_SPAWN_CWD             — working directory for a spawned session
+                                 (default: ~/obsidian_vault — must already be
+                                 trust-accepted for every backend above)
+  DELTA_SPAWN_READY_TIMEOUT_SEC — how long to wait for a spawned pane to
+                                 start reading input before giving up (default: 20)
 
 Loop: every iteration (a few seconds) processes pending session_requests
 and pending outbox, then checks for new messages across all armed
@@ -86,36 +96,54 @@ _LIST_COMMAND_RE = re.compile(r"^/list\s*$", re.IGNORECASE)
 _DELETE_COMMAND_RE = re.compile(r"^/delete\s+(\S+)\s*$", re.IGNORECASE)
 _NEW_COMMAND_RE = re.compile(r"^/new\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
-# name -> actual wrapper command. Each backend carries its own
-# CLAUDE_CONFIG_DIR (proxy: default ~/.claude, deep: ~/.claude-deepseek,
-# mimo: ~/.claude-mimo) — deliberately spawning the wrapper script by
-# name, not `claude` with flags reproduced here, so a config change in
-# one wrapper (model, proxy, env) doesn't need mirroring in this dict.
-# Explicit user requirement (2026-09-14): never mix configs between them.
-_BACKENDS = {"proxy": "claude-proxy", "deep": "claude-deep", "mimo": "claude-mimo"}
+def _parse_backends(spec: str) -> dict[str, str]:
+    """"name=command,name=command" -> {name: command}. Never hardcode this
+    dict itself in source (2026-09-14 review: the backend set is entirely
+    this deployment's own choice of wrapper scripts, not something the
+    daemon's logic should know by name) — DELTA_SPAWN_BACKENDS below is
+    the only place it's actually spelled out, in the env file, same as
+    every other host-specific value (DELTA_ADDR, DELTA_PEER_ADDR, ...)."""
+    backends = {}
+    for pair in spec.split(","):
+        name, sep, cmd = pair.strip().partition("=")
+        if sep and name and cmd:
+            backends[name] = cmd
+    return backends
+
+
+# Every backend wrapper this deployment knows how to spawn for the
+# control-chat "/new" command, and the actual command each name runs.
+# Each one carries its own CLAUDE_CONFIG_DIR (this daemon's default,
+# battle-tested locally: proxy -> ~/.claude, deep -> ~/.claude-deepseek,
+# mimo -> ~/.claude-mimo) — spawning the wrapper *script* by name here,
+# never `claude` with flags reproduced in this file, so a config change
+# in one wrapper (model, proxy, env) never needs mirroring here. Override
+# via DELTA_SPAWN_BACKENDS in the env file for a different deployment
+# (different wrapper names, or none at all) without touching source.
+_BACKENDS = _parse_backends(os.environ.get(
+    "DELTA_SPAWN_BACKENDS", "proxy=claude-proxy,deep=claude-deep,mimo=claude-mimo",
+))
 
 # tmux session new windows get opened in — see tmux.spawn_window. A
 # session name, not a pane — must already exist (the daemon does not
 # create tmux sessions, only windows inside one).
 SPAWN_TMUX_SESSION = os.environ.get("DELTA_SPAWN_TMUX_SESSION", "main")
 
-# Working directory for a phone-spawned session. Hardcoded rather than a
-# command argument (open question in design.md, not resolved with the
-# user yet) — picked because all three backends already have a trust
-# dialog accepted for it from today's interactive use, and a fresh cwd's
-# first-run trust prompt is a real risk here: it isn't one of the shapes
-# is_permission_prompt()/is_limit_notice() recognize, so it would sit on
-# screen unforwarded and undetected, silently wedging the new session
-# forever with nobody able to answer it.
-SPAWN_CWD = "~/obsidian_vault"
+# Working directory for a phone-spawned session. Not a per-command
+# argument (open question in design.md, still unresolved) — one fixed
+# default per deployment, because a fresh cwd's first-run trust dialog is
+# a real risk here: it isn't one of the shapes is_permission_prompt()/
+# is_limit_notice() recognize, so it would sit on screen unforwarded and
+# undetected, silently wedging the new session forever with nobody able
+# to answer it. Whatever this is set to must already be trust-accepted
+# for every backend in DELTA_SPAWN_BACKENDS.
+SPAWN_CWD = os.environ.get("DELTA_SPAWN_CWD", "~/obsidian_vault")
 
-# Best-effort pause between opening the pane and typing the first message
-# into it — untested against real startup latency (MCP servers alone took
-# ~1s in a live session today; total time to an accepting prompt is
-# unmeasured). Too short loses the first message into a harness that
-# isn't reading stdin yet; there is currently no readiness signal to poll
-# instead. Flagged as a known rough edge in design.md, not solved here.
-SPAWN_READY_WAIT_SEC = 3
+# Upper bound on tmux.wait_ready() after opening a fresh pane — see its
+# docstring for why this is a poll, not a sleep. A pane that never
+# becomes ready within this bound (dead backend, bad API key, network
+# down) gets reported back to the control chat instead of typed into blind.
+SPAWN_READY_TIMEOUT_SEC = float(os.environ.get("DELTA_SPAWN_READY_TIMEOUT_SEC", "20"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -229,11 +257,22 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
 
     store.create_session_direct(db_path, session_id, chat_id, target)
 
-    # First typed message both promotes the chat (invisible to the peer
-    # until at least one message is sent, same as cli.py's create-session)
-    # and becomes the actual task — exactly like a phone reply landing in
-    # any other session's pane. Timing is a guess, see SPAWN_READY_WAIT_SEC.
-    time.sleep(SPAWN_READY_WAIT_SEC)
+    # Block here until the pane's status line proves the TUI is actually
+    # reading keystrokes (see tmux.wait_ready) — typing blind into a pane
+    # that hasn't switched stdin to raw mode yet risked losing the first
+    # message outright (see design.md). This holds up the daemon's main
+    # loop for the wait, same trade-off cycle_to_mode already makes
+    # elsewhere in this codebase for tmux interactions.
+    if not tmux.wait_ready(target, timeout_sec=SPAWN_READY_TIMEOUT_SEC):
+        log.warning("сессия %s: панель %s не отдала признаков готовности за %sс",
+                     session_id, target, SPAWN_READY_TIMEOUT_SEC)
+        store.enqueue_outbox(
+            db_path, session_id, chat_id,
+            f"сессия поднята, но панель не откликнулась за {SPAWN_READY_TIMEOUT_SEC:.0f}с — "
+            "возможно, ещё стартует или бэкенд не поднялся; напиши сюда сама задача, когда будет видно ответ",
+        )
+        return f"session={session_id[:8]}: панель не ответила за {SPAWN_READY_TIMEOUT_SEC:.0f}с — см. чат"
+
     try:
         tmux.send_keys(target, task)
     except Exception:
