@@ -92,10 +92,19 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 # not in the sessions table). Same "no separate sender check" reasoning
 # as the rest of this module's trust model: a 1:1 chat can only ever
 # contain the bot and that one contact.
-_LIST_BACKENDS_COMMAND_RE = re.compile(r"^/list-backends\s*$", re.IGNORECASE)
-_LIST_SESSIONS_COMMAND_RE = re.compile(r"^/list-sessions\s*$", re.IGNORECASE)
-_DELETE_SESSION_COMMAND_RE = re.compile(r"^/delete-session\s+(\S+)\s*$", re.IGNORECASE)
-_NEW_SESSION_COMMAND_RE = re.compile(r"^/new-session\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
+# Leading "/" optional and a short alias accepted alongside the full
+# name (2026-09-14, on request — typing exact hyphenated command names
+# on a phone keyboard was the actual complaint). Safe to loosen here
+# specifically: this is the one chat that never reaches a tmux pane (see
+# the trust-model comment above), so a false-positive match here costs
+# nothing worse than an unexpected reply, never a misfired keystroke
+# into someone's session. Unmatched text still falls through to
+# _CONTROL_HELP (see _process_control_commands) — every miss is
+# self-documenting, not a silent no-op.
+_LIST_BACKENDS_COMMAND_RE = re.compile(r"^/?(?:list-backends|lb)\s*$", re.IGNORECASE)
+_LIST_SESSIONS_COMMAND_RE = re.compile(r"^/?(?:list-sessions|ls)\s*$", re.IGNORECASE)
+_DELETE_SESSION_COMMAND_RE = re.compile(r"^/?(?:delete-session|ds)\s+(\S+)\s*$", re.IGNORECASE)
+_NEW_SESSION_COMMAND_RE = re.compile(r"^/?(?:new-session|ns)\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 
 def _parse_backends(spec: str) -> dict[str, str]:
     """"name=command,name=command" -> {name: command}. Never hardcode this
@@ -311,8 +320,11 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
 
 
 _CONTROL_HELP = (
-    "команды: /list-backends, /list-sessions, "
-    "/delete-session <id>, /new-session <backend> [задача]"
+    "команды (слэш необязателен):\n"
+    "list-backends / lb\n"
+    "list-sessions / ls\n"
+    "delete-session <id> / ds <id>\n"
+    "new-session <backend> [задача] / ns <backend> [задача]"
 )
 
 
