@@ -8,11 +8,11 @@ Configuration — environment variables:
   DELTA_PEER_ADDR             — user's address (personal account)
   DELTA_ACCOUNTS_DIR          — where deltachat-core keeps its own db
   DELTA_STORE_DB              — path to the drop-box sqlite (store.py)
-  DELTA_SPAWN_BACKENDS        — control-chat "/new" backends, "name=cmd,..."
+  DELTA_SPAWN_BACKENDS        — control-chat "/new-session" backends, "name=cmd,..."
                                  (default: proxy=claude-proxy,deep=claude-deep,
                                  mimo=claude-mimo — this deployment's own
                                  wrapper scripts, override or clear for another)
-  DELTA_SPAWN_TMUX_SESSION    — tmux session "/new" opens windows in (default: main)
+  DELTA_SPAWN_TMUX_SESSION    — tmux session "/new-session" opens windows in (default: main)
   DELTA_SPAWN_CWD             — working directory for a spawned session
                                  (default: ~/obsidian_vault — must already be
                                  trust-accepted for every backend above)
@@ -92,9 +92,10 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 # not in the sessions table). Same "no separate sender check" reasoning
 # as the rest of this module's trust model: a 1:1 chat can only ever
 # contain the bot and that one contact.
-_LIST_COMMAND_RE = re.compile(r"^/list\s*$", re.IGNORECASE)
-_DELETE_COMMAND_RE = re.compile(r"^/delete\s+(\S+)\s*$", re.IGNORECASE)
-_NEW_COMMAND_RE = re.compile(r"^/new\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_LIST_BACKENDS_COMMAND_RE = re.compile(r"^/list-backends\s*$", re.IGNORECASE)
+_LIST_SESSIONS_COMMAND_RE = re.compile(r"^/list-sessions\s*$", re.IGNORECASE)
+_DELETE_SESSION_COMMAND_RE = re.compile(r"^/delete-session\s+(\S+)\s*$", re.IGNORECASE)
+_NEW_SESSION_COMMAND_RE = re.compile(r"^/new-session\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
 def _parse_backends(spec: str) -> dict[str, str]:
     """"name=command,name=command" -> {name: command}. Never hardcode this
@@ -112,7 +113,7 @@ def _parse_backends(spec: str) -> dict[str, str]:
 
 
 # Every backend wrapper this deployment knows how to spawn for the
-# control-chat "/new" command, and the actual command each name runs.
+# control-chat "/new-session" command, and the actual command each name runs.
 # Each one carries its own CLAUDE_CONFIG_DIR (this daemon's default,
 # battle-tested locally: proxy -> ~/.claude, deep -> ~/.claude-deepseek,
 # mimo -> ~/.claude-mimo) — spawning the wrapper *script* by name here,
@@ -217,6 +218,12 @@ def _process_deletions(bridge: Bridge, db_path: str):
             log.exception("deletion #%s: ошибка удаления чата", item["id"])
 
 
+def _format_backend_list() -> str:
+    if not _BACKENDS:
+        return "бэкенды не настроены (DELTA_SPAWN_BACKENDS пуст)"
+    return "\n".join(f"{name} -> {cmd}" for name, cmd in _BACKENDS.items())
+
+
 def _format_session_list(db_path: str) -> str:
     sessions = store.all_sessions(db_path)
     if not sessions:
@@ -231,7 +238,7 @@ def _format_session_list(db_path: str) -> str:
 def _handle_delete_command(db_path: str, prefix: str) -> str:
     sess = store.find_session_by_prefix(db_path, prefix)
     if sess is None:
-        return f"не нашёл однозначную сессию по {prefix!r} — сверься с /list"
+        return f"не нашёл однозначную сессию по {prefix!r} — сверься с /list-sessions"
     store.enqueue_deletion(db_path, sess["session_id"], sess["chat_id"])
     return f"удаляю чат сессии {prefix} (chat_id={sess['chat_id']})"
 
@@ -284,30 +291,36 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
         return f"session={session_id[:8]} поднята, но задачу напечатать не вышло — см. чат"
 
     store.enqueue_outbox(db_path, session_id, chat_id, f"сессия {session_id[:8]} поднята ({cmd})")
-    log.info("сессия %s: создана по команде /new %s, панель %s", session_id, backend, target)
+    log.info("сессия %s: создана по команде /new-session %s, панель %s", session_id, backend, target)
     return f"поднимаю {cmd}, session={session_id[:8]}, задача отправлена"
 
 
-_CONTROL_HELP = "команды: /list, /delete <id>, /new <proxy|deep|mimo> <задача>"
+_CONTROL_HELP = (
+    "команды: /list-backends, /list-sessions, "
+    "/delete-session <id>, /new-session <backend> <задача>"
+)
 
 
 def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int):
     """Control-chat command dispatcher — see the module-level comment
-    above _LIST_COMMAND_RE for the trust model. Runs independently of
-    the armed_sessions loop that every other _process_* function here
-    iterates: this chat_id is deliberately never a session's chat_id, so
-    _process_tmux_delivery would never reach it even if left unconsumed."""
+    above _LIST_BACKENDS_COMMAND_RE for the trust model. Runs
+    independently of the armed_sessions loop that every other _process_*
+    function here iterates: this chat_id is deliberately never a
+    session's chat_id, so _process_tmux_delivery would never reach it
+    even if left unconsumed."""
     msgs = store.peek_unconsumed(db_path, control_chat_id)
     if not msgs:
         return
     for m in msgs:
         text = m["text"].strip()
         try:
-            if _LIST_COMMAND_RE.match(text):
+            if _LIST_BACKENDS_COMMAND_RE.match(text):
+                reply = _format_backend_list()
+            elif _LIST_SESSIONS_COMMAND_RE.match(text):
                 reply = _format_session_list(db_path)
-            elif match := _DELETE_COMMAND_RE.match(text):
+            elif match := _DELETE_SESSION_COMMAND_RE.match(text):
                 reply = _handle_delete_command(db_path, match.group(1))
-            elif match := _NEW_COMMAND_RE.match(text):
+            elif match := _NEW_SESSION_COMMAND_RE.match(text):
                 reply = _handle_new_command(bridge, db_path, match.group(1), match.group(2).strip())
             else:
                 reply = _CONTROL_HELP
@@ -315,7 +328,7 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
             # Defense in depth on top of tmux.wait_ready's own fix
             # (2026-09-14): whatever the cause, an unhandled exception
             # here must never leave the message unconsumed — that's what
-            # turned one bad "/new" into a spawn-a-pane-every-tick retry
+            # turned one bad "/new-session" into a spawn-a-pane-every-tick retry
             # storm that ran for ~6 minutes and created 64 chats before
             # anyone noticed (see design.md). mark_consumed below is
             # unconditional specifically so this can never repeat for
@@ -349,7 +362,7 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
     on a chat_id nothing ever wrote to). Also why this function can no
     longer bail out early just because there are no armed sessions: the
     control chat matters *most* exactly when nothing is armed yet (that's
-    when "/new" gets used)."""
+    when "/new-session" gets used)."""
     sessions_by_chat = {s["chat_id"]: s for s in store.armed_sessions(db_path)}
     if not sessions_by_chat and control_chat_id is None:
         return
@@ -685,7 +698,7 @@ def run():
             control_chat_id = bridge.control_chat_id()
             log.info("control-чат: id=%s", control_chat_id)
         except Exception:
-            log.exception("не удалось получить control-чат — команды /list,/delete,/new недоступны")
+            log.exception("не удалось получить control-чат — команды /list-backends,/list-sessions,/delete-session,/new-session недоступны")
             control_chat_id = None
 
         while _running:
