@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS renames (
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+
+-- Same queue contract as renames (CLI/control-chat -> daemon, apply-once,
+-- bounded retries) for the control-chat "/delete" command (see design.md,
+-- "План: control-протокол через личные сообщения").
+CREATE TABLE IF NOT EXISTS deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -182,6 +195,60 @@ def disarm_session(db_path: str, session_id: str) -> None:
             "UPDATE sessions SET status = 'disarmed', updated_at = ? WHERE session_id = ?",
             (time.time(), session_id),
         )
+        conn.commit()
+
+
+def all_sessions(db_path: str):
+    """Every known session regardless of status — for the control-chat
+    "/list" command, which should surface disarmed sessions too (unlike
+    armed_sessions(), which is deliberately scoped to what the dispatcher
+    loop acts on, not to what a human asking "what do I have" wants to
+    see)."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_session_by_prefix(db_path: str, prefix: str):
+    """Resolves a short, phone-keyboard-typeable prefix (what "/list"
+    shows — see daemon._format_session_list) to exactly one session row,
+    for the control-chat "/delete" command. A full session_id is a uuid4,
+    impractical to type on a phone. Returns None on zero or on more than
+    one match — an ambiguous prefix refuses instead of guessing which
+    chat to delete."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE session_id LIKE ? || '%'", (prefix,)
+        ).fetchall()
+        return dict(rows[0]) if len(rows) == 1 else None
+
+
+def create_session_direct(db_path: str, session_id: str, chat_id: int, tmux_target: str) -> None:
+    """Registers a brand-new session in one shot, already 'armed' with its
+    tmux pane bound. Used only when the DAEMON itself spawns both the
+    tmux pane and the chat (control-chat "/new" — see daemon._handle_new)
+    — there is no separate running process to round-trip through
+    session_requests (the normal path: an already-running session's own
+    CLI asks for a chat, then separately registers its own pane via
+    $TMUX_PANE). One INSERT covers what those two steps do together."""
+    with connect(db_path) as conn:
+        now = time.time()
+        conn.execute(
+            "INSERT INTO sessions (session_id, chat_id, status, tmux_target, created_at, updated_at) "
+            "VALUES (?, ?, 'armed', ?, ?, ?)",
+            (session_id, chat_id, tmux_target, now, now),
+        )
+        conn.commit()
+
+
+def remove_session(db_path: str, session_id: str) -> None:
+    """Drops the session row entirely — used once its chat has actually
+    been deleted (see mark_deletion_applied's caller in daemon.py).
+    Unlike disarm_session, there is no chat left to ever rearm back into."""
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         conn.commit()
 
 
@@ -403,5 +470,44 @@ def mark_rename_error(db_path: str, rename_id: int, error: str) -> None:
         conn.execute(
             "UPDATE renames SET error = ?, attempts = attempts + 1 WHERE id = ?",
             (error, rename_id),
+        )
+        conn.commit()
+
+
+# --- Deletions (control-chat -> daemon): same contract as renames ---
+
+def enqueue_deletion(db_path: str, session_id: str, chat_id: int) -> int:
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO deletions (session_id, chat_id, created_at) VALUES (?, ?, ?)",
+            (session_id, chat_id, time.time()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+DELETION_MAX_ATTEMPTS = 5  # same bound as outbox/renames — see mark_outbox_error
+
+
+def pending_deletions(db_path: str):
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM deletions WHERE applied = 0 AND attempts < ?",
+            (DELETION_MAX_ATTEMPTS,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_deletion_applied(db_path: str, deletion_id: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute("UPDATE deletions SET applied = 1 WHERE id = ?", (deletion_id,))
+        conn.commit()
+
+
+def mark_deletion_error(db_path: str, deletion_id: int, error: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE deletions SET error = ?, attempts = attempts + 1 WHERE id = ?",
+            (error, deletion_id),
         )
         conn.commit()

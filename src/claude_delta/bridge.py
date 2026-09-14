@@ -138,6 +138,20 @@ class Bridge:
         chat = self._account.get_chat_by_id(chat_id)
         chat.set_name(name)
 
+    def control_chat_id(self) -> int:
+        """The 1:1 chat with the known peer — a channel distinct from any
+        per-session group chat, reserved for control commands (/list,
+        /delete, /new — see design.md, "План: control-протокол"). Delta
+        Chat's own 1:1 chat model already guarantees only the bot and this
+        one contact can ever be members of it, which is the entire "is
+        this really the trusted peer" check for anything read from this
+        chat_id — no separate sender allowlist needed. Contact.create_chat()
+        creates it on first call and just returns the same chat afterwards."""
+        return self.peer_contact().create_chat().id
+
+    def delete_chat(self, chat_id: int) -> None:
+        self._account.get_chat_by_id(chat_id).delete()
+
     DC_STATE_IN_FRESH = 10
 
     def fetch_all_fresh_messages(self):

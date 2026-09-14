@@ -125,13 +125,64 @@ def run():
     if any(p["id"] == err_id for p in store.pending_renames(db)):
         failures.append("pending_renames kept retrying past RENAME_MAX_ATTEMPTS")
 
+    # --- deletions: same contract as renames/outbox ---
+    db = _fresh_db()
+    del_id = store.enqueue_deletion(db, "s1", chat_id=9)
+    pending = store.pending_deletions(db)
+    if [p["id"] for p in pending] != [del_id]:
+        failures.append(f"pending_deletions did not return the enqueued deletion: {pending}")
+    store.mark_deletion_applied(db, del_id)
+    if any(p["id"] == del_id for p in store.pending_deletions(db)):
+        failures.append("pending_deletions re-offered an already-applied deletion")
+
+    db = _fresh_db()
+    err_id = store.enqueue_deletion(db, "s1", chat_id=9)
+    for _ in range(store.DELETION_MAX_ATTEMPTS):
+        pending = store.pending_deletions(db)
+        if not any(p["id"] == err_id for p in pending):
+            failures.append("pending_deletions dropped the deletion before it hit DELETION_MAX_ATTEMPTS")
+            break
+        store.mark_deletion_error(db, err_id, "simulated failure")
+    if any(p["id"] == err_id for p in store.pending_deletions(db)):
+        failures.append("pending_deletions kept retrying past DELETION_MAX_ATTEMPTS")
+
+    # --- control-protocol session helpers (2026-09-14) ---
+    db = _fresh_db()
+    store.create_session_direct(db, "cccccccc-1111-2222-3333-444444444444", chat_id=77, tmux_target="%9")
+    sess = store.get_session(db, "cccccccc-1111-2222-3333-444444444444")
+    if not sess or sess["status"] != "armed" or sess["chat_id"] != 77 or sess["tmux_target"] != "%9":
+        failures.append(f"create_session_direct did not write a fully-armed row: {sess}")
+    if sess not in store.all_sessions(db):
+        failures.append("all_sessions did not include a freshly created_session_direct row")
+
+    store.disarm_session(db, "cccccccc-1111-2222-3333-444444444444")
+    if len(store.armed_sessions(db)) != 0:
+        failures.append("disarmed session still showed up in armed_sessions")
+    if len(store.all_sessions(db)) != 1:
+        failures.append("all_sessions dropped a disarmed session — should show every status")
+
+    store.remove_session(db, "cccccccc-1111-2222-3333-444444444444")
+    if store.get_session(db, "cccccccc-1111-2222-3333-444444444444") is not None:
+        failures.append("remove_session left the row behind")
+
+    # find_session_by_prefix: unique / ambiguous / no-match
+    db = _fresh_db()
+    store.create_session_direct(db, "abc11111-0000-0000-0000-000000000000", chat_id=1, tmux_target="%1")
+    store.create_session_direct(db, "abc22222-0000-0000-0000-000000000000", chat_id=2, tmux_target="%2")
+    if store.find_session_by_prefix(db, "abc1")["chat_id"] != 1:
+        failures.append("find_session_by_prefix did not resolve a unique prefix")
+    if store.find_session_by_prefix(db, "abc") is not None:
+        failures.append("find_session_by_prefix should refuse an ambiguous prefix, not guess")
+    if store.find_session_by_prefix(db, "zzz") is not None:
+        failures.append("find_session_by_prefix should return None for no match")
+
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
 
-    print("OK — rearm/peek-mark/outbox-backoff checks passed")
+    print("OK — rearm/peek-mark/outbox-backoff/deletions/control-protocol checks passed")
 
 
 if __name__ == "__main__":

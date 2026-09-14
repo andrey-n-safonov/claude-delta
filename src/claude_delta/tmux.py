@@ -119,6 +119,23 @@ def cycle_to_mode(target: str, want: str, max_presses: int = 6) -> str | None:
     return mode
 
 
+def spawn_window(command: str, session: str = "main") -> str:
+    """Opens a new tmux window in `session` running `command`, returns its
+    pane-id. Used only for daemon-initiated session creation (the
+    control-chat "/new" command, see daemon._handle_new) — every other
+    function in this module addresses a pane that already exists.
+
+    -d: don't switch a currently-attached client to the new window — this
+    runs from the daemon, not from inside any client, but a user could be
+    attached and watching another pane right now.
+    """
+    result = subprocess.run(
+        ["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", session, command],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
+
+
 def pane_alive(target: str) -> bool:
     """False if the pane was closed by hand — avoids crashes in the daemon loop."""
     result = subprocess.run(

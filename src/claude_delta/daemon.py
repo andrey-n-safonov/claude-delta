@@ -22,6 +22,7 @@ import re
 import signal
 import sys
 import time
+import uuid
 
 from . import ocr, sleepinhibit, store, stt, tmux
 from .bridge import Bridge
@@ -72,6 +73,49 @@ MODE_CYCLE_MAX_PRESSES = 6  # one full lap of the 4-state ring is 4, plus margin
 # documented exactly once, in deploy/commands/delta-chat.md, which
 # `/delta-chat on` already reads and follows regardless of language.
 _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
+
+# Control-chat protocol (2026-09-14, see design.md "План: control-протокол
+# через личные сообщения"): the bot's own 1:1 chat with the known peer —
+# resolved once at startup via Bridge.control_chat_id() — accepts a small
+# set of session-management commands, parsed here and never passed
+# through to any tmux pane (there isn't one for this chat_id anyway, it's
+# not in the sessions table). Same "no separate sender check" reasoning
+# as the rest of this module's trust model: a 1:1 chat can only ever
+# contain the bot and that one contact.
+_LIST_COMMAND_RE = re.compile(r"^/list\s*$", re.IGNORECASE)
+_DELETE_COMMAND_RE = re.compile(r"^/delete\s+(\S+)\s*$", re.IGNORECASE)
+_NEW_COMMAND_RE = re.compile(r"^/new\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+# name -> actual wrapper command. Each backend carries its own
+# CLAUDE_CONFIG_DIR (proxy: default ~/.claude, deep: ~/.claude-deepseek,
+# mimo: ~/.claude-mimo) — deliberately spawning the wrapper script by
+# name, not `claude` with flags reproduced here, so a config change in
+# one wrapper (model, proxy, env) doesn't need mirroring in this dict.
+# Explicit user requirement (2026-09-14): never mix configs between them.
+_BACKENDS = {"proxy": "claude-proxy", "deep": "claude-deep", "mimo": "claude-mimo"}
+
+# tmux session new windows get opened in — see tmux.spawn_window. A
+# session name, not a pane — must already exist (the daemon does not
+# create tmux sessions, only windows inside one).
+SPAWN_TMUX_SESSION = os.environ.get("DELTA_SPAWN_TMUX_SESSION", "main")
+
+# Working directory for a phone-spawned session. Hardcoded rather than a
+# command argument (open question in design.md, not resolved with the
+# user yet) — picked because all three backends already have a trust
+# dialog accepted for it from today's interactive use, and a fresh cwd's
+# first-run trust prompt is a real risk here: it isn't one of the shapes
+# is_permission_prompt()/is_limit_notice() recognize, so it would sit on
+# screen unforwarded and undetected, silently wedging the new session
+# forever with nobody able to answer it.
+SPAWN_CWD = "~/obsidian_vault"
+
+# Best-effort pause between opening the pane and typing the first message
+# into it — untested against real startup latency (MCP servers alone took
+# ~1s in a live session today; total time to an accepting prompt is
+# unmeasured). Too short loses the first message into a harness that
+# isn't reading stdin yet; there is currently no readiness signal to poll
+# instead. Flagged as a known rough edge in design.md, not solved here.
+SPAWN_READY_WAIT_SEC = 3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,6 +175,106 @@ def _process_renames(bridge: Bridge, db_path: str):
             log.exception("rename #%s: ошибка переименования", item["id"])
 
 
+def _process_deletions(bridge: Bridge, db_path: str):
+    for item in store.pending_deletions(db_path):
+        try:
+            bridge.delete_chat(item["chat_id"])
+            store.mark_deletion_applied(db_path, item["id"])
+            # No chat left to ever rearm back into — unlike disarm, this
+            # drops the row entirely (see store.remove_session).
+            store.remove_session(db_path, item["session_id"])
+            log.info("сессия %s: чат %s удалён по команде", item["session_id"], item["chat_id"])
+        except Exception as e:
+            store.mark_deletion_error(db_path, item["id"], repr(e))
+            log.exception("deletion #%s: ошибка удаления чата", item["id"])
+
+
+def _format_session_list(db_path: str) -> str:
+    sessions = store.all_sessions(db_path)
+    if not sessions:
+        return "нет ни одной сессии"
+    lines = [
+        f"{s['session_id'][:8]}  {s['status']}  chat={s['chat_id']}  tmux={s.get('tmux_target') or '—'}"
+        for s in sessions
+    ]
+    return "\n".join(lines)
+
+
+def _handle_delete_command(db_path: str, prefix: str) -> str:
+    sess = store.find_session_by_prefix(db_path, prefix)
+    if sess is None:
+        return f"не нашёл однозначную сессию по {prefix!r} — сверься с /list"
+    store.enqueue_deletion(db_path, sess["session_id"], sess["chat_id"])
+    return f"удаляю чат сессии {prefix} (chat_id={sess['chat_id']})"
+
+
+def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -> str:
+    cmd = _BACKENDS.get(backend.lower())
+    if cmd is None:
+        return f"не знаю бэкенд {backend!r} — есть {', '.join(_BACKENDS)}"
+
+    session_id = str(uuid.uuid4())
+    spawn_cmd = f"cd {SPAWN_CWD} && {cmd} --session-id {session_id}"
+    try:
+        target = tmux.spawn_window(spawn_cmd, session=SPAWN_TMUX_SESSION)
+    except Exception:
+        log.exception("сессия %s: не удалось поднять tmux-окно (%s)", session_id, cmd)
+        return "не получилось поднять новую сессию (tmux) — см. лог демона"
+
+    try:
+        chat_id = bridge.create_session_group(task[:60])
+    except Exception:
+        log.exception("сессия %s: чат не создан, но tmux-окно уже открыто", session_id)
+        return "tmux-окно поднято, но чат создать не вышло — см. лог демона (окно осталось, прибрать вручную)"
+
+    store.create_session_direct(db_path, session_id, chat_id, target)
+
+    # First typed message both promotes the chat (invisible to the peer
+    # until at least one message is sent, same as cli.py's create-session)
+    # and becomes the actual task — exactly like a phone reply landing in
+    # any other session's pane. Timing is a guess, see SPAWN_READY_WAIT_SEC.
+    time.sleep(SPAWN_READY_WAIT_SEC)
+    try:
+        tmux.send_keys(target, task)
+    except Exception:
+        log.exception("сессия %s: чат и окно созданы, но задачу напечатать не вышло", session_id)
+        store.enqueue_outbox(
+            db_path, session_id, chat_id,
+            "сессия поднята, но задачу напечатать не вышло — набери её сюда ещё раз",
+        )
+        return f"session={session_id[:8]} поднята, но задачу напечатать не вышло — см. чат"
+
+    store.enqueue_outbox(db_path, session_id, chat_id, f"сессия {session_id[:8]} поднята ({cmd})")
+    log.info("сессия %s: создана по команде /new %s, панель %s", session_id, backend, target)
+    return f"поднимаю {cmd}, session={session_id[:8]}, задача отправлена"
+
+
+_CONTROL_HELP = "команды: /list, /delete <id>, /new <proxy|deep|mimo> <задача>"
+
+
+def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int):
+    """Control-chat command dispatcher — see the module-level comment
+    above _LIST_COMMAND_RE for the trust model. Runs independently of
+    the armed_sessions loop that every other _process_* function here
+    iterates: this chat_id is deliberately never a session's chat_id, so
+    _process_tmux_delivery would never reach it even if left unconsumed."""
+    msgs = store.peek_unconsumed(db_path, control_chat_id)
+    if not msgs:
+        return
+    for m in msgs:
+        text = m["text"].strip()
+        if _LIST_COMMAND_RE.match(text):
+            reply = _format_session_list(db_path)
+        elif match := _DELETE_COMMAND_RE.match(text):
+            reply = _handle_delete_command(db_path, match.group(1))
+        elif match := _NEW_COMMAND_RE.match(text):
+            reply = _handle_new_command(bridge, db_path, match.group(1), match.group(2).strip())
+        else:
+            reply = _CONTROL_HELP
+        store.mark_consumed(db_path, "control", [m["id"]])
+        store.enqueue_outbox(db_path, "control", control_chat_id, reply)
+
+
 def _process_outbox(bridge: Bridge, db_path: str):
     for item in store.pending_outbox(db_path):
         try:
@@ -142,31 +286,40 @@ def _process_outbox(bridge: Bridge, db_path: str):
             log.exception("outbox #%s: ошибка отправки", item["id"])
 
 
-def _process_inbox(bridge: Bridge, db_path: str):
+def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = None):
     """One account-wide fetch (see Bridge.fetch_all_fresh_messages),
     routed to armed sessions by chat_id — replaces the old per-session
     chat.get_messages() loop (reliability pass 2026-08-10, see the
-    docstring on fetch_all_fresh_messages for why that scaled badly)."""
+    docstring on fetch_all_fresh_messages for why that scaled badly).
+
+    control_chat_id (2026-09-14): the one extra chat_id worth storing
+    messages for even though it's never in the sessions table — without
+    it, _process_control_commands would starve forever (peek_unconsumed
+    on a chat_id nothing ever wrote to). Also why this function can no
+    longer bail out early just because there are no armed sessions: the
+    control chat matters *most* exactly when nothing is armed yet (that's
+    when "/new" gets used)."""
     sessions_by_chat = {s["chat_id"]: s for s in store.armed_sessions(db_path)}
-    if not sessions_by_chat:
+    if not sessions_by_chat and control_chat_id is None:
         return
 
     processed_by_chat: dict[int, list[int]] = {}
     for msg in bridge.fetch_all_fresh_messages():
         chat_id = msg["chat_id"]
         sess = sessions_by_chat.get(chat_id)
-        if sess is None:
-            # Not an armed session's chat (old test/closed chat) —
-            # fetch_all_fresh_messages already marked it seen account-
-            # wide; nothing else to do with it here.
+        if sess is None and chat_id != control_chat_id:
+            # Not an armed session's chat and not the control chat (old
+            # test/closed chat) — fetch_all_fresh_messages already marked
+            # it seen account-wide; nothing else to do with it here.
             continue
+        log_label = sess["session_id"] if sess else "control"
         text = msg["text"]
         if msg["view_type"] in VOICE_VIEW_TYPES and msg["file"]:
             try:
                 transcript = stt.transcribe(msg["file"])
                 text = f"[голосовое] {transcript}"
             except Exception:
-                log.exception("сессия %s: ошибка распознавания msg_id=%s", sess["session_id"], msg["id"])
+                log.exception("сессия %s: ошибка распознавания msg_id=%s", log_label, msg["id"])
                 text = "[голосовое — распознать не удалось]"
         elif msg["view_type"] in IMAGE_VIEW_TYPES and msg["file"]:
             caption = msg["text"].strip() if msg["text"] else ""
@@ -174,11 +327,11 @@ def _process_inbox(bridge: Bridge, db_path: str):
                 recognized = ocr.recognize(msg["file"])
                 body = " — ".join(p for p in (caption, recognized) if p) or "текст не найден"
             except Exception:
-                log.exception("сессия %s: ошибка OCR msg_id=%s", sess["session_id"], msg["id"])
+                log.exception("сессия %s: ошибка OCR msg_id=%s", log_label, msg["id"])
                 body = f"{caption} (распознать не удалось)" if caption else "распознать не удалось"
             text = f"[изображение] {body}"
         store.store_inbox_message(db_path, chat_id, msg["id"], text)
-        log.info("сессия %s: новое сообщение (msg_id=%s) %r", sess["session_id"], msg["id"], text[:60])
+        log.info("сессия %s: новое сообщение (msg_id=%s) %r", log_label, msg["id"], text[:60])
         processed_by_chat.setdefault(chat_id, []).append(msg["id"])
 
     # Delete only after everything (including STT) has been processed —
@@ -473,14 +626,28 @@ def run():
 
     last_restart = time.time()
     with Bridge(accounts_dir, addr, password, peer_addr) as bridge:
+        # Resolved once, not per-loop-iteration — it's a stable 1:1 chat
+        # with a contact that isn't going to change mid-run. Best-effort:
+        # missing key-contact (no prior secure-join) shouldn't take the
+        # rest of the daemon down, just the control-chat feature.
+        try:
+            control_chat_id = bridge.control_chat_id()
+            log.info("control-чат: id=%s", control_chat_id)
+        except Exception:
+            log.exception("не удалось получить control-чат — команды /list,/delete,/new недоступны")
+            control_chat_id = None
+
         while _running:
             try:
                 _process_session_requests(bridge, db_path)
                 _process_renames(bridge, db_path)
+                _process_deletions(bridge, db_path)
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)
-                _process_inbox(bridge, db_path)
+                _process_inbox(bridge, db_path, control_chat_id)
                 _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
+                if control_chat_id is not None:
+                    _process_control_commands(bridge, db_path, control_chat_id)
                 _process_tmux_delivery(db_path)  # consumes what _process_inbox stored above
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:
