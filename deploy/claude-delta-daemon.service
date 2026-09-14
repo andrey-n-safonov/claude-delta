@@ -5,7 +5,18 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/claude-delta/daemon.env
-Environment=PATH=%h/work/claude-delta/.venv/bin:%h/bin:%h/.local/bin:/usr/bin:/bin
+# .venv/bin deliberately LAST, not first: ExecStart already uses its
+# full absolute path, so PATH doesn't need it for that — but putting it
+# first shadowed bare "python3" for anything spawned under this PATH
+# (control-chat /new-session sessions, and MCP servers Claude Code itself
+# launches from inside them): claude-delta's own venv python3 (a symlink
+# to /usr/bin/python3, but venv-scoped site-packages) has none of an MCP
+# server's actual dependencies, so e.g. evolution-mail/zammad (both
+# configured as bare "python3" in ~/.claude.json's mcpServers) silently
+# failed to start with ModuleNotFoundError while telegram ("uv", not
+# shadowed) and outline (absolute interpreter path) worked fine —
+# confirmed live 2026-09-14, see design.md.
+Environment=PATH=%h/bin:%h/.local/bin:/usr/bin:/bin:%h/work/claude-delta/.venv/bin
 ExecStart=%h/work/claude-delta/.venv/bin/python -m claude_delta.daemon
 WorkingDirectory=%h/work/claude-delta
 Restart=on-failure
