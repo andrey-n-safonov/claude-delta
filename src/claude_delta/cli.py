@@ -242,6 +242,21 @@ def cmd_status(args):
 
 
 def cmd_close(args):
+    """Disarms the session immediately (dispatcher stops touching the
+    pane right away, in this same process) and queues the chat for
+    deletion (2026-09-14 — previously the group chat was left behind on
+    purpose, see design.md's older note; changed on request: a closed
+    session's chat is clutter, and armed-but-actually-deleted-by-hand
+    rows had already accumulated in practice). Deletion itself happens
+    asynchronously in the daemon (store.enqueue_deletion -> same queue
+    the control-chat "/delete" command uses) — this process never talks
+    to Delta Chat directly.
+
+    Note the chat.delete() this eventually calls is local to the bot's
+    own account only — it does not remove anything from the peer's own
+    device (see Bridge.delete_chat, and design.md). The user still sees
+    the chat on their phone afterward; only the daemon's own bookkeeping
+    (this sqlite db) actually shrinks."""
     session_id = _session_id(args)
     sess = store.get_session(DB_PATH, session_id)
     if not sess:
@@ -253,6 +268,7 @@ def cmd_close(args):
     )
     store.disarm_session(DB_PATH, session_id)
     store.clear_tmux(DB_PATH, session_id)  # dispatcher stops touching the pane
+    store.enqueue_deletion(DB_PATH, session_id, sess["chat_id"])
     return 0
 
 

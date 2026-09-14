@@ -302,14 +302,26 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
         return
     for m in msgs:
         text = m["text"].strip()
-        if _LIST_COMMAND_RE.match(text):
-            reply = _format_session_list(db_path)
-        elif match := _DELETE_COMMAND_RE.match(text):
-            reply = _handle_delete_command(db_path, match.group(1))
-        elif match := _NEW_COMMAND_RE.match(text):
-            reply = _handle_new_command(bridge, db_path, match.group(1), match.group(2).strip())
-        else:
-            reply = _CONTROL_HELP
+        try:
+            if _LIST_COMMAND_RE.match(text):
+                reply = _format_session_list(db_path)
+            elif match := _DELETE_COMMAND_RE.match(text):
+                reply = _handle_delete_command(db_path, match.group(1))
+            elif match := _NEW_COMMAND_RE.match(text):
+                reply = _handle_new_command(bridge, db_path, match.group(1), match.group(2).strip())
+            else:
+                reply = _CONTROL_HELP
+        except Exception:
+            # Defense in depth on top of tmux.wait_ready's own fix
+            # (2026-09-14): whatever the cause, an unhandled exception
+            # here must never leave the message unconsumed — that's what
+            # turned one bad "/new" into a spawn-a-pane-every-tick retry
+            # storm that ran for ~6 minutes and created 64 chats before
+            # anyone noticed (see design.md). mark_consumed below is
+            # unconditional specifically so this can never repeat for
+            # *any* future exception, not just the one already fixed.
+            log.exception("control-команда %r: необработанная ошибка", text[:80])
+            reply = "внутренняя ошибка при выполнении команды — см. лог демона"
         store.mark_consumed(db_path, "control", [m["id"]])
         store.enqueue_outbox(db_path, "control", control_chat_id, reply)
 
@@ -680,9 +692,9 @@ def run():
             try:
                 _process_session_requests(bridge, db_path)
                 _process_renames(bridge, db_path)
-                _process_deletions(bridge, db_path)
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
-                _process_outbox(bridge, db_path)
+                _process_outbox(bridge, db_path)  # before deletions: let a pending "session closed" notice out first
+                _process_deletions(bridge, db_path)
                 _process_inbox(bridge, db_path, control_chat_id)
                 _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
                 if control_chat_id is not None:

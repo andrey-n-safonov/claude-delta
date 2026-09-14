@@ -153,12 +153,23 @@ def wait_ready(target: str, timeout_sec: float = 20.0, poll_interval_sec: float 
     Returns False on timeout — pane may still be starting, or never will
     (wrong API key, network down for that backend) — rather than
     guessing further; the caller decides what to do instead of typing
-    into a pane nobody is reading yet.
+    into a pane nobody is reading yet. Also returns False (not raise) if
+    the pane dies mid-poll — capture_pane's underlying `tmux capture-pane`
+    exits non-zero once the target is gone, and a spawned pane dying
+    before ever becoming ready is exactly the kind of failure this
+    function exists to report, not to propagate as a crash (confirmed
+    live 2026-09-14: an unhandled CalledProcessError here escaped all the
+    way out of the daemon's command dispatcher, which then never marked
+    the triggering message consumed — same message got reprocessed, and
+    re-spawned, every loop tick forever; see design.md).
     """
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        if current_mode(target) is not None:
-            return True
+        try:
+            if current_mode(target) is not None:
+                return True
+        except subprocess.CalledProcessError:
+            return False
         time.sleep(poll_interval_sec)
     return False
 
