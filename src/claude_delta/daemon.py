@@ -95,7 +95,7 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 _LIST_BACKENDS_COMMAND_RE = re.compile(r"^/list-backends\s*$", re.IGNORECASE)
 _LIST_SESSIONS_COMMAND_RE = re.compile(r"^/list-sessions\s*$", re.IGNORECASE)
 _DELETE_SESSION_COMMAND_RE = re.compile(r"^/delete-session\s+(\S+)\s*$", re.IGNORECASE)
-_NEW_SESSION_COMMAND_RE = re.compile(r"^/new-session\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_NEW_SESSION_COMMAND_RE = re.compile(r"^/new-session\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 
 def _parse_backends(spec: str) -> dict[str, str]:
     """"name=command,name=command" -> {name: command}. Never hardcode this
@@ -244,6 +244,11 @@ def _handle_delete_command(db_path: str, prefix: str) -> str:
 
 
 def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -> str:
+    """task may be empty — "/new-session <backend>" with no task just
+    spins the session up and leaves it waiting; the user then talks to it
+    normally through its own (freshly created) group chat, same as any
+    other session. Skips the wait_ready/send_keys dance entirely in that
+    case — there is nothing to type yet, so nothing to wait ready for."""
     cmd = _BACKENDS.get(backend.lower())
     if cmd is None:
         return f"не знаю бэкенд {backend!r} — есть {', '.join(_BACKENDS)}"
@@ -256,13 +261,23 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
         log.exception("сессия %s: не удалось поднять tmux-окно (%s)", session_id, cmd)
         return "не получилось поднять новую сессию (tmux) — см. лог демона"
 
+    chat_name = task[:60] if task else f"{cmd} — {session_id[:8]}"
     try:
-        chat_id = bridge.create_session_group(task[:60])
+        chat_id = bridge.create_session_group(chat_name)
     except Exception:
         log.exception("сессия %s: чат не создан, но tmux-окно уже открыто", session_id)
         return "tmux-окно поднято, но чат создать не вышло — см. лог демона (окно осталось, прибрать вручную)"
 
     store.create_session_direct(db_path, session_id, chat_id, target)
+
+    if not task:
+        # Nothing to type in — the pane is left exactly as the backend
+        # started it, and this session behaves like any other armed one
+        # from here on: the user just writes into its (now-promoted)
+        # group chat, normal delivery picks it up.
+        store.enqueue_outbox(db_path, session_id, chat_id, f"сессия {session_id[:8]} поднята ({cmd}), жду задачу")
+        log.info("сессия %s: создана по команде /new-session %s без задачи, панель %s", session_id, backend, target)
+        return f"поднимаю {cmd}, session={session_id[:8]}, без задачи — пиши прямо в её чат"
 
     # Block here until the pane's status line proves the TUI is actually
     # reading keystrokes (see tmux.wait_ready) — typing blind into a pane
@@ -297,7 +312,7 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
 
 _CONTROL_HELP = (
     "команды: /list-backends, /list-sessions, "
-    "/delete-session <id>, /new-session <backend> <задача>"
+    "/delete-session <id>, /new-session <backend> [задача]"
 )
 
 
@@ -321,7 +336,8 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
             elif match := _DELETE_SESSION_COMMAND_RE.match(text):
                 reply = _handle_delete_command(db_path, match.group(1))
             elif match := _NEW_SESSION_COMMAND_RE.match(text):
-                reply = _handle_new_command(bridge, db_path, match.group(1), match.group(2).strip())
+                task = (match.group(2) or "").strip()
+                reply = _handle_new_command(bridge, db_path, match.group(1), task)
             else:
                 reply = _CONTROL_HELP
         except Exception:
