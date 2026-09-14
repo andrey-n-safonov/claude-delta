@@ -423,11 +423,24 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
             log.exception("чат %s: ошибка удаления обработанных сообщений", chat_id)
 
 
-def _clear_pane_state(db_path: str, session_id: str):
-    """Drops every tmux-registration-scoped bit of state for a session:
-    both dedup hashes, both stability-pending entries. Used both when the
-    pane is confirmed gone and when neither shape is currently showing."""
+def _clear_pane_state(db_path: str, session_id: str, chat_id: int):
+    """A session's tmux pane was confirmed gone (tmux.pane_alive() ==
+    False, the only condition either call site below uses this under) —
+    disarms it and queues its chat for deletion, on top of dropping every
+    tmux-registration-scoped bit of state (both dedup hashes, both
+    stability-pending entries).
+
+    Healthcheck added 2026-09-14, on request: previously this only
+    cleared tmux_target and left the session 'armed' forever — nothing
+    was ever listening again, but nothing said so either. Two sessions
+    sat exactly like that for about a month before being found by manual
+    /list-sessions inspection and cleaned by hand. Same deletion queue
+    /delete-session and cli.cmd_close already use (store.enqueue_deletion)
+    — actual chat.delete() happens later, in _process_deletions; it is
+    local to the bot's own account only (see Bridge.delete_chat)."""
+    store.disarm_session(db_path, session_id)
     store.clear_tmux(db_path, session_id)
+    store.enqueue_deletion(db_path, session_id, chat_id)
     _pending_prompt_hash.pop(f"{session_id}:last_prompt_hash", None)
     _pending_prompt_hash.pop(f"{session_id}:last_limit_hash", None)
     _pending_clear.discard(session_id)
@@ -445,8 +458,8 @@ def _process_tmux_prompts(db_path: str):
         session_id, chat_id = sess["session_id"], sess["chat_id"]
 
         if not tmux.pane_alive(target):
-            log.info("сессия %s: панель %s больше не существует, снимаю регистрацию", session_id, target)
-            _clear_pane_state(db_path, session_id)
+            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат", session_id, target)
+            _clear_pane_state(db_path, session_id, chat_id)
             continue
 
         try:
@@ -648,8 +661,8 @@ def _process_tmux_delivery(db_path: str):
             continue
 
         if not tmux.pane_alive(target):
-            log.info("сессия %s: панель %s больше не существует, снимаю регистрацию", session_id, target)
-            _clear_pane_state(db_path, session_id)
+            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат", session_id, target)
+            _clear_pane_state(db_path, session_id, chat_id)
             continue
 
         consumer = f"dispatcher:{session_id}"
