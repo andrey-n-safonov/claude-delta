@@ -13,9 +13,13 @@ Configuration — environment variables:
                                  mimo=claude-mimo — this deployment's own
                                  wrapper scripts, override or clear for another)
   DELTA_SPAWN_TMUX_SESSION    — tmux session "/new-session" opens windows in (default: main)
-  DELTA_SPAWN_CWD             — working directory for a spawned session
-                                 (default: ~/obsidian_vault — must already be
-                                 trust-accepted for every backend above)
+  DELTA_SPAWN_FOLDERS         — control-chat "/new-session"/"/list-folders" working
+                                 directories, "name=path,..." (default: vault=~/obsidian_vault
+                                 only — this deployment's own project folders, each
+                                 presumably with its own .mcp.json; every path must already
+                                 be trust-accepted for every backend in DELTA_SPAWN_BACKENDS)
+  DELTA_SPAWN_DEFAULT_FOLDER  — which DELTA_SPAWN_FOLDERS name "/new-session" uses when
+                                 none is given explicitly (default: vault)
   DELTA_SPAWN_READY_TIMEOUT_SEC — how long to wait for a spawned pane to
                                  start reading input before giving up (default: 20)
 
@@ -29,6 +33,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import signal
 import sys
 import time
@@ -102,23 +107,25 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 # _CONTROL_HELP (see _process_control_commands) — every miss is
 # self-documenting, not a silent no-op.
 _LIST_BACKENDS_COMMAND_RE = re.compile(r"^/?(?:list-backends|lb)\s*$", re.IGNORECASE)
+_LIST_FOLDERS_COMMAND_RE = re.compile(r"^/?(?:list-folders|lf)\s*$", re.IGNORECASE)
 _LIST_SESSIONS_COMMAND_RE = re.compile(r"^/?(?:list-sessions|ls)\s*$", re.IGNORECASE)
 _DELETE_SESSION_COMMAND_RE = re.compile(r"^/?(?:delete-session|ds)\s+(\S+)\s*$", re.IGNORECASE)
 _NEW_SESSION_COMMAND_RE = re.compile(r"^/?(?:new-session|ns)\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 
-def _parse_backends(spec: str) -> dict[str, str]:
-    """"name=command,name=command" -> {name: command}. Never hardcode this
-    dict itself in source (2026-09-14 review: the backend set is entirely
-    this deployment's own choice of wrapper scripts, not something the
-    daemon's logic should know by name) — DELTA_SPAWN_BACKENDS below is
-    the only place it's actually spelled out, in the env file, same as
-    every other host-specific value (DELTA_ADDR, DELTA_PEER_ADDR, ...)."""
-    backends = {}
+def _parse_name_value_pairs(spec: str) -> dict[str, str]:
+    """"name=value,name=value" -> {name: value}. Shared parser for every
+    control-chat registry below (backends, folders) — never hardcode
+    these dicts themselves in source (2026-09-14 review: the backend set
+    and the folder set are entirely this deployment's own choices, not
+    something the daemon's logic should know by name) — the env file is
+    the only place either is actually spelled out, same as every other
+    host-specific value (DELTA_ADDR, DELTA_PEER_ADDR, ...)."""
+    pairs = {}
     for pair in spec.split(","):
-        name, sep, cmd = pair.strip().partition("=")
-        if sep and name and cmd:
-            backends[name] = cmd
-    return backends
+        name, sep, value = pair.strip().partition("=")
+        if sep and name and value:
+            pairs[name] = value
+    return pairs
 
 
 # Every backend wrapper this deployment knows how to spawn for the
@@ -130,7 +137,7 @@ def _parse_backends(spec: str) -> dict[str, str]:
 # in one wrapper (model, proxy, env) never needs mirroring here. Override
 # via DELTA_SPAWN_BACKENDS in the env file for a different deployment
 # (different wrapper names, or none at all) without touching source.
-_BACKENDS = _parse_backends(os.environ.get(
+_BACKENDS = _parse_name_value_pairs(os.environ.get(
     "DELTA_SPAWN_BACKENDS", "proxy=claude-proxy,deep=claude-deep,mimo=claude-mimo",
 ))
 
@@ -139,15 +146,19 @@ _BACKENDS = _parse_backends(os.environ.get(
 # create tmux sessions, only windows inside one).
 SPAWN_TMUX_SESSION = os.environ.get("DELTA_SPAWN_TMUX_SESSION", "main")
 
-# Working directory for a phone-spawned session. Not a per-command
-# argument (open question in design.md, still unresolved) — one fixed
-# default per deployment, because a fresh cwd's first-run trust dialog is
-# a real risk here: it isn't one of the shapes is_permission_prompt()/
-# is_limit_notice() recognize, so it would sit on screen unforwarded and
-# undetected, silently wedging the new session forever with nobody able
-# to answer it. Whatever this is set to must already be trust-accepted
-# for every backend in DELTA_SPAWN_BACKENDS.
-SPAWN_CWD = os.environ.get("DELTA_SPAWN_CWD", "~/obsidian_vault")
+# Working directories "/new-session" can spawn into, by name — this
+# deployment's project folders, presumably each with its own .mcp.json
+# (2026-09-14, on request). Every path here must already be
+# trust-accepted for every backend in _BACKENDS: a fresh cwd's first-run
+# trust dialog is a real risk — it isn't one of the shapes
+# is_permission_prompt()/is_limit_notice() recognize, so it would sit on
+# screen unforwarded and undetected, silently wedging the new session
+# forever with nobody able to answer it. DEFAULT_FOLDER_NAME picks which
+# entry "/new-session <backend> <task>" (no folder token) uses.
+_FOLDERS = _parse_name_value_pairs(os.environ.get(
+    "DELTA_SPAWN_FOLDERS", "vault=~/obsidian_vault",
+))
+DEFAULT_FOLDER_NAME = os.environ.get("DELTA_SPAWN_DEFAULT_FOLDER", "vault")
 
 # Upper bound on tmux.wait_ready() after opening a fresh pane — see its
 # docstring for why this is a poll, not a sleep. A pane that never
@@ -233,6 +244,34 @@ def _format_backend_list() -> str:
     return "\n".join(f"{name} -> {cmd}" for name, cmd in _BACKENDS.items())
 
 
+def _format_folder_list() -> str:
+    if not _FOLDERS:
+        return "папки не настроены (DELTA_SPAWN_FOLDERS пуст)"
+    lines = []
+    for name, path in _FOLDERS.items():
+        default_tag = " (по умолчанию)" if name == DEFAULT_FOLDER_NAME else ""
+        lines.append(f"{name} -> {path}{default_tag}")
+    return "\n".join(lines)
+
+
+def _split_folder_and_task(rest: str) -> tuple[str, str]:
+    """rest is everything "/new-session <backend>" received after the
+    backend name. If its first word names a configured folder (_FOLDERS),
+    that's the folder and everything after it is the task; otherwise the
+    whole thing is the task and DEFAULT_FOLDER_NAME applies. Same
+    "look it up in the registry, don't guess" pattern as backend
+    selection — no fuzzy distinction between "a folder name" and "the
+    first word of a task that happens to also be one", the registry
+    itself decides."""
+    rest = rest.strip()
+    if not rest:
+        return DEFAULT_FOLDER_NAME, ""
+    first, _, remainder = rest.partition(" ")
+    if first in _FOLDERS:
+        return first, remainder.strip()
+    return DEFAULT_FOLDER_NAME, rest
+
+
 def _format_session_list(db_path: str) -> str:
     sessions = store.all_sessions(db_path)
     if not sessions:
@@ -252,18 +291,35 @@ def _handle_delete_command(db_path: str, prefix: str) -> str:
     return f"удаляю чат сессии {prefix} (chat_id={sess['chat_id']})"
 
 
-def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -> str:
-    """task may be empty — "/new-session <backend>" with no task just
-    spins the session up and leaves it waiting; the user then talks to it
-    normally through its own (freshly created) group chat, same as any
-    other session. Skips the wait_ready/send_keys dance entirely in that
-    case — there is nothing to type yet, so nothing to wait ready for."""
+def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str) -> str:
+    """rest is everything after the backend name — "[folder] [task]", see
+    _split_folder_and_task. Both folder and task are optional independent
+    of each other: "/new-session deep" (default folder, no task),
+    "/new-session deep pirelli" (folder, no task), "/new-session deep
+    pirelli чини баг" (both), "/new-session deep чини баг" (default
+    folder, task — "чини" isn't a configured folder name so the whole
+    rest stays the task). No task just spins the session up and leaves it
+    waiting; the user then talks to it normally through its own (freshly
+    created) group chat, same as any other session — skips the
+    wait_ready/send_keys dance entirely in that case, nothing to type yet
+    so nothing to wait ready for."""
     cmd = _BACKENDS.get(backend.lower())
     if cmd is None:
         return f"не знаю бэкенд {backend!r} — есть {', '.join(_BACKENDS)}"
 
+    folder_name, task = _split_folder_and_task(rest)
+    cwd = _FOLDERS.get(folder_name)
+    if cwd is None:
+        return f"не знаю папку {folder_name!r} — есть {', '.join(_FOLDERS)} (проверь DELTA_SPAWN_DEFAULT_FOLDER)"
+
     session_id = str(uuid.uuid4())
-    spawn_cmd = f"cd {SPAWN_CWD} && {cmd} --session-id {session_id}"
+    # expanduser THEN quote — folder names/paths can (and do: project
+    # names in this deployment are Russian phrases with spaces) contain
+    # spaces; quoting a literal "~/..." would break tilde expansion
+    # since that only happens unquoted, so expand first, quote the
+    # already-absolute result.
+    cwd_arg = shlex.quote(os.path.expanduser(cwd))
+    spawn_cmd = f"cd {cwd_arg} && {cmd} --session-id {session_id}"
     try:
         target = tmux.spawn_window(spawn_cmd, session=SPAWN_TMUX_SESSION)
     except Exception:
@@ -285,8 +341,9 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
         # from here on: the user just writes into its (now-promoted)
         # group chat, normal delivery picks it up.
         store.enqueue_outbox(db_path, session_id, chat_id, f"сессия {session_id[:8]} поднята ({cmd}), жду задачу")
-        log.info("сессия %s: создана по команде /new-session %s без задачи, панель %s", session_id, backend, target)
-        return f"поднимаю {cmd}, session={session_id[:8]}, без задачи — пиши прямо в её чат"
+        log.info("сессия %s: создана по команде /new-session %s %s без задачи, панель %s",
+                 session_id, backend, folder_name, target)
+        return f"поднимаю {cmd} в {folder_name}, session={session_id[:8]}, без задачи — пиши прямо в её чат"
 
     # Block here until the pane's status line proves the TUI is actually
     # reading keystrokes (see tmux.wait_ready) — typing blind into a pane
@@ -315,16 +372,17 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, task: str) -
         return f"session={session_id[:8]} поднята, но задачу напечатать не вышло — см. чат"
 
     store.enqueue_outbox(db_path, session_id, chat_id, f"сессия {session_id[:8]} поднята ({cmd})")
-    log.info("сессия %s: создана по команде /new-session %s, панель %s", session_id, backend, target)
-    return f"поднимаю {cmd}, session={session_id[:8]}, задача отправлена"
+    log.info("сессия %s: создана по команде /new-session %s %s, панель %s", session_id, backend, folder_name, target)
+    return f"поднимаю {cmd} в {folder_name}, session={session_id[:8]}, задача отправлена"
 
 
 _CONTROL_HELP = (
     "команды (слэш необязателен):\n"
     "list-backends / lb\n"
+    "list-folders / lf\n"
     "list-sessions / ls\n"
     "delete-session <id> / ds <id>\n"
-    "new-session <backend> [задача] / ns <backend> [задача]"
+    "new-session <backend> [папка] [задача] / ns <backend> [папка] [задача]"
 )
 
 
@@ -343,13 +401,15 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
         try:
             if _LIST_BACKENDS_COMMAND_RE.match(text):
                 reply = _format_backend_list()
+            elif _LIST_FOLDERS_COMMAND_RE.match(text):
+                reply = _format_folder_list()
             elif _LIST_SESSIONS_COMMAND_RE.match(text):
                 reply = _format_session_list(db_path)
             elif match := _DELETE_SESSION_COMMAND_RE.match(text):
                 reply = _handle_delete_command(db_path, match.group(1))
             elif match := _NEW_SESSION_COMMAND_RE.match(text):
-                task = (match.group(2) or "").strip()
-                reply = _handle_new_command(bridge, db_path, match.group(1), task)
+                rest = (match.group(2) or "").strip()
+                reply = _handle_new_command(bridge, db_path, match.group(1), rest)
             else:
                 reply = _CONTROL_HELP
         except Exception:
