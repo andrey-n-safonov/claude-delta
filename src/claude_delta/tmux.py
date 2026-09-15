@@ -119,18 +119,30 @@ def cycle_to_mode(target: str, want: str, max_presses: int = 6) -> str | None:
     return mode
 
 
-def spawn_window(command: str, session: str = "main") -> str:
-    """Opens a new tmux window in `session` running `command`, returns its
-    pane-id. Used only for daemon-initiated session creation (the
-    control-chat "/new" command, see daemon._handle_new) — every other
-    function in this module addresses a pane that already exists.
+def spawn_session(command: str, name: str) -> str:
+    """Creates a new, dedicated detached tmux session `name` running
+    `command`, returns its pane-id. Used only for daemon-initiated session
+    creation (the control-chat "/new-session" command, see
+    daemon._handle_new_command) — every other function in this module
+    addresses a pane that already exists.
 
-    -d: don't switch a currently-attached client to the new window — this
+    One session per spawn, not a window inside a shared session: an
+    earlier version opened a window in a fixed session (default "main")
+    that had to already exist and stay alive for spawning to work at all
+    — confirmed broken live 2026-09-15 on a host where nobody had a tmux
+    server running at the time (no interactive login since boot), so
+    every "/new-session" from the phone failed outright. A session tmux
+    creates on demand has no such precondition, and self-destructs when
+    `command` exits — same cleanup behavior the old window-in-"main" had
+    (last pane in a window/session closing ends it), just without needing
+    something else to already be there first.
+
+    -d: don't switch a currently-attached client to the new session — this
     runs from the daemon, not from inside any client, but a user could be
-    attached and watching another pane right now.
+    attached and watching another session right now.
     """
     result = subprocess.run(
-        ["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", session, command],
+        ["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, command],
         capture_output=True, text=True, check=True,
     )
     return result.stdout.strip()
@@ -142,7 +154,7 @@ def wait_ready(target: str, timeout_sec: float = 20.0, poll_interval_sec: float 
     finished starting and switched stdin to raw mode, i.e. it is actually
     reading keystrokes now, not just that the pty exists.
 
-    Used right after spawn_window(), before typing the first message into
+    Used right after spawn_session(), before typing the first message into
     a brand-new pane (see daemon._handle_new_command). A blind sleep
     before this guessed at startup latency instead of observing it —
     unmeasured MCP-server spawn alone took ~1s in a live session, total

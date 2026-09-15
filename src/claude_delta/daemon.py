@@ -12,7 +12,6 @@ Configuration — environment variables:
                                  (default: proxy=claude-proxy,deep=claude-deep,
                                  mimo=claude-mimo — this deployment's own
                                  wrapper scripts, override or clear for another)
-  DELTA_SPAWN_TMUX_SESSION    — tmux session "/new-session" opens windows in (default: main)
   DELTA_SPAWN_FOLDERS         — control-chat "/new-session"/"/list-folders" working
                                  directories, "name=path,..." (default: vault=~/obsidian_vault
                                  only — this deployment's own project folders, each
@@ -140,11 +139,6 @@ def _parse_name_value_pairs(spec: str) -> dict[str, str]:
 _BACKENDS = _parse_name_value_pairs(os.environ.get(
     "DELTA_SPAWN_BACKENDS", "proxy=claude-proxy,deep=claude-deep,mimo=claude-mimo",
 ))
-
-# tmux session new windows get opened in — see tmux.spawn_window. A
-# session name, not a pane — must already exist (the daemon does not
-# create tmux sessions, only windows inside one).
-SPAWN_TMUX_SESSION = os.environ.get("DELTA_SPAWN_TMUX_SESSION", "main")
 
 # Working directories "/new-session" can spawn into, by name — this
 # deployment's project folders, presumably each with its own .mcp.json
@@ -321,9 +315,9 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str) -
     cwd_arg = shlex.quote(os.path.expanduser(cwd))
     spawn_cmd = f"cd {cwd_arg} && {cmd} --session-id {session_id}"
     try:
-        target = tmux.spawn_window(spawn_cmd, session=SPAWN_TMUX_SESSION)
+        target = tmux.spawn_session(spawn_cmd, name=f"delta-{session_id[:8]}")
     except Exception:
-        log.exception("сессия %s: не удалось поднять tmux-окно (%s)", session_id, cmd)
+        log.exception("сессия %s: не удалось поднять tmux-сессию (%s)", session_id, cmd)
         return "не получилось поднять новую сессию (tmux) — см. лог демона"
 
     chat_name = task[:60] if task else f"{cmd} — {session_id[:8]}"
