@@ -21,6 +21,11 @@ Configuration — environment variables:
                                  none is given explicitly (default: vault)
   DELTA_SPAWN_READY_TIMEOUT_SEC — how long to wait for a spawned pane to
                                  start reading input before giving up (default: 20)
+  DELTA_FILES_DIR             — fallback for files received in session chats when the
+                                 session's own scratchpad can't be located (normally they
+                                 go there, see attachments.py; default: ~/.local/share/claude-delta/files)
+  DELTA_FILES_MAX_MB          — larger attachments are refused with a chat notice (default: 50)
+  DELTA_FILES_KEEP_DAYS       — attachments older than this are removed (default: 14)
 
 Loop: every iteration (a few seconds) processes pending session_requests
 and pending outbox, then checks for new messages across all armed
@@ -38,7 +43,7 @@ import sys
 import time
 import uuid
 
-from . import ocr, sleepinhibit, store, stt, tmux
+from . import attachments, ocr, sleepinhibit, store, stt, tmux
 from .bridge import Bridge
 from .prompt_detect import (
     extract_context,
@@ -51,6 +56,13 @@ from .prompt_detect import (
 
 VOICE_VIEW_TYPES = {"Voice", "Audio"}
 IMAGE_VIEW_TYPES = {"Image", "Sticker"}
+
+# Received-file storage (fallback root only), see attachments.py. Read at import like the
+# DELTA_SPAWN_* settings below; every one has a working default.
+FILES_DIR = os.environ.get("DELTA_FILES_DIR", attachments.DEFAULT_ROOT)
+FILES_MAX_BYTES = int(float(os.environ.get("DELTA_FILES_MAX_MB", "50")) * 1024 * 1024)
+FILES_KEEP_DAYS = float(os.environ.get("DELTA_FILES_KEEP_DAYS", "14"))
+FILES_CLEANUP_INTERVAL_SEC = 6 * 3600
 
 LOOP_INTERVAL_SEC = 5
 FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
@@ -432,6 +444,28 @@ def _process_outbox(bridge: Bridge, db_path: str):
             log.exception("outbox #%s: ошибка отправки", item["id"])
 
 
+def _attachment_suffix(msg: dict, sess: dict, log_label: str) -> str:
+    """Saves msg's attachment (see attachments.py) and returns the
+    " <path> (<mime>, <size>)" fragment for the injected text. Failure
+    modes stay visible in the text itself — a silently dropped file would
+    look to the user like the session ignored it."""
+    src = msg["file"]
+    try:
+        cwd = tmux.pane_path(sess["tmux_target"]) if sess.get("tmux_target") else None
+        dest_dir = attachments.session_dir(sess["session_id"], cwd, FILES_DIR, msg["chat_id"])
+        dest = attachments.save(src, dest_dir, msg["id"], FILES_MAX_BYTES)
+    except attachments.TooLarge as e:
+        size = attachments.human_size(e.args[0])
+        log.warning("сессия %s: файл msg_id=%s слишком большой (%s)", log_label, msg["id"], size)
+        return f" не сохранён: {size} больше лимита {attachments.human_size(FILES_MAX_BYTES)}"
+    except Exception:
+        log.exception("сессия %s: ошибка сохранения файла msg_id=%s", log_label, msg["id"])
+        return " не сохранён (ошибка на стороне демона)"
+    meta = ", ".join(p for p in (msg.get("file_mime"), attachments.human_size(os.path.getsize(dest))) if p)
+    log.info("сессия %s: файл msg_id=%s сохранён в %s", log_label, msg["id"], dest)
+    return f" {dest} ({meta})"
+
+
 def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = None):
     """One account-wide fetch (see Bridge.fetch_all_fresh_messages),
     routed to armed sessions by chat_id — replaces the old per-session
@@ -476,6 +510,15 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
                 log.exception("сессия %s: ошибка OCR msg_id=%s", log_label, msg["id"])
                 body = f"{caption} (распознать не удалось)" if caption else "распознать не удалось"
             text = f"[изображение] {body}"
+            if sess is not None:
+                text += _attachment_suffix(msg, sess, log_label)
+        elif msg["file"] and sess is not None:
+            # Any other attachment (PDF, office, log, archive, ...): the
+            # session gets a stable path to open, not the content itself.
+            caption = msg["text"].strip() if msg["text"] else ""
+            text = f"[файл]{_attachment_suffix(msg, sess, log_label)}"
+            if caption:
+                text += f" — {caption}"
         store.store_inbox_message(db_path, chat_id, msg["id"], text)
         log.info("сессия %s: новое сообщение (msg_id=%s) %r", log_label, msg["id"], text[:60])
         processed_by_chat.setdefault(chat_id, []).append(msg["id"])
@@ -784,6 +827,7 @@ def run():
     stt.preload()
 
     last_restart = time.time()
+    last_files_cleanup = 0.0
     with Bridge(accounts_dir, addr, password, peer_addr) as bridge:
         # Resolved once, not per-loop-iteration — it's a stable 1:1 chat
         # with a contact that isn't going to change mid-run. Best-effort:
@@ -811,6 +855,15 @@ def run():
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:
                 log.exception("ошибка в цикле демона")
+
+            if time.time() - last_files_cleanup > FILES_CLEANUP_INTERVAL_SEC:
+                try:
+                    removed = attachments.cleanup(FILES_DIR, FILES_KEEP_DAYS)
+                    if removed:
+                        log.info("чистка вложений: удалено %d файл(ов) старше %s дн.", removed, FILES_KEEP_DAYS)
+                except Exception:
+                    log.exception("ошибка чистки вложений")
+                last_files_cleanup = time.time()
 
             if time.time() - last_restart > FALLBACK_RESTART_SEC:
                 log.info("периодический перезапуск IO (fallback, см. design.md)")

@@ -193,3 +193,14 @@ def pane_alive(target: str) -> bool:
         capture_output=True,
     )
     return result.returncode == 0
+
+
+def pane_path(target: str) -> str | None:
+    """Working directory of the pane's foreground process (the session's
+    cwd), None if tmux can't say."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", target, "#{pane_current_path}"],
+        capture_output=True, text=True,
+    )
+    path = result.stdout.strip()
+    return path if result.returncode == 0 and path else None
