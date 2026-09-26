@@ -134,6 +134,14 @@ class Bridge:
         msg = chat.send_text(text)
         return msg.id
 
+    def send_file(self, chat_id: int, path: str, caption: str = "") -> int:
+        """File attachment (caption optional). The core copies the file
+        into its own blob dir at send time, so the source may change or
+        vanish afterwards."""
+        chat = self._account.get_chat_by_id(chat_id)
+        msg = chat.send_message(text=caption or None, file=path, filename=os.path.basename(path))
+        return msg.id
+
     def rename_chat(self, chat_id: int, name: str) -> None:
         chat = self._account.get_chat_by_id(chat_id)
         chat.set_name(name)

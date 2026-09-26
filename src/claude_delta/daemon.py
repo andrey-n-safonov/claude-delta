@@ -436,7 +436,10 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
 def _process_outbox(bridge: Bridge, db_path: str):
     for item in store.pending_outbox(db_path):
         try:
-            bridge.send_text(item["chat_id"], item["text"])
+            if item.get("file"):
+                bridge.send_file(item["chat_id"], item["file"], item["text"])
+            else:
+                bridge.send_text(item["chat_id"], item["text"])
             store.mark_outbox_sent(db_path, item["id"])
             log.info("outbox #%s отправлен в чат %s", item["id"], item["chat_id"])
         except Exception as e:

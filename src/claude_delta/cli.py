@@ -151,6 +151,30 @@ def cmd_send(args):
     return 0
 
 
+SEND_FILE_MAX_BYTES = int(float(os.environ.get("DELTA_SEND_MAX_MB", "20")) * 1024 * 1024)
+
+
+def cmd_send_file(args):
+    session_id = _session_id(args)
+    sess = store.get_session(DB_PATH, session_id)
+    if not sess:
+        print("нет такой сессии — сначала create-session", file=sys.stderr)
+        return 1
+    # Absolute + resolved: the daemon runs from another cwd and reads the
+    # path later, at its own pace.
+    path = os.path.realpath(os.path.expanduser(args.path))
+    if not os.path.isfile(path):
+        print(f"не файл или не существует: {path}", file=sys.stderr)
+        return 1
+    size = os.path.getsize(path)
+    if size > SEND_FILE_MAX_BYTES:
+        print(f"файл {size / 1048576:.1f} МБ больше лимита {SEND_FILE_MAX_BYTES / 1048576:.0f} МБ "
+              f"(вложения идут через почту; DELTA_SEND_MAX_MB)", file=sys.stderr)
+        return 1
+    store.enqueue_outbox(DB_PATH, session_id, sess["chat_id"], args.caption or "", file=path)
+    return 0
+
+
 def cmd_rename(args):
     session_id = _session_id(args)
     sess = store.get_session(DB_PATH, session_id)
@@ -294,6 +318,13 @@ def main():
                     help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
     p.add_argument("text")
     p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser("send-file")
+    p.add_argument("path", help="файл для отправки в чат сессии")
+    p.add_argument("caption", nargs="?", default="", help="подпись (необязательно)")
+    p.add_argument("--session-id", dest="session_id", default=None,
+                    help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
+    p.set_defaults(func=cmd_send_file)
 
     p = sub.add_parser("rename")
     p.add_argument("session_id", nargs="?", default=None,

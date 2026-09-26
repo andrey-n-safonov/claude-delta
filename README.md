@@ -124,6 +124,14 @@ claude-delta close <session_id>
 обычный текст). Лимит `DELTA_FILES_MAX_MB` (50); при превышении в сессию
 приходит `[файл] не сохранён: ...`. Файлы из control-чата не сохраняются.
 
+Обратное направление — сессия отправляет файл в чат:
+`claude-delta send-file <путь> [подпись]` (`--session-id` по умолчанию из
+`$CLAUDE_CODE_SESSION_ID`). Команда кладёт строку в `outbox` (колонка
+`file`, абсолютный путь), демон шлёт её через `Bridge.send_file`
+(`chat.send_message(file=...)`); ядро копирует файл в свой blob-каталог в
+момент отправки. Лимит `DELTA_SEND_MAX_MB` (20 — вложения идут через
+почту), проверяется в CLI сразу, ошибка видна вызывающей стороне.
+
 Демон запускается переменными окружения `DELTA_ADDR`, `DELTA_PASSWORD`,
 `DELTA_PEER_ADDR`, `DELTA_ACCOUNTS_DIR`, `DELTA_STORE_DB`:
 

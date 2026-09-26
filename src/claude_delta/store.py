@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at REAL NOT NULL,
     sent INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    file TEXT
 );
 
 CREATE TABLE IF NOT EXISTS inbox (
@@ -86,6 +87,9 @@ _MIGRATIONS = (
     # gets needlessly re-sent every time an unrelated prompt resolves.
     "ALTER TABLE sessions ADD COLUMN last_limit_hash TEXT",
     "ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    # Absolute path of a file to send to the chat (2026-09-26); text is
+    # then its caption, possibly empty. NULL = plain text message.
+    "ALTER TABLE outbox ADD COLUMN file TEXT",
 )
 
 
@@ -327,11 +331,12 @@ def set_last_limit_hash(db_path: str, session_id: str, limit_hash: str | None) -
 
 # --- Outbox (CLI -> daemon) ---
 
-def enqueue_outbox(db_path: str, session_id: str, chat_id: int, text: str) -> int:
+def enqueue_outbox(db_path: str, session_id: str, chat_id: int, text: str,
+                   file: str | None = None) -> int:
     with connect(db_path) as conn:
         cur = conn.execute(
-            "INSERT INTO outbox (session_id, chat_id, text, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, chat_id, text, time.time()),
+            "INSERT INTO outbox (session_id, chat_id, text, created_at, file) VALUES (?, ?, ?, ?, ?)",
+            (session_id, chat_id, text, time.time(), file),
         )
         conn.commit()
         return cur.lastrowid

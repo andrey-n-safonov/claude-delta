@@ -104,6 +104,15 @@ def run():
     if any(p["id"] == ok_id for p in store.pending_outbox(db)):
         failures.append("pending_outbox re-offered an already-sent message")
 
+    # --- file outbox rows: path + caption round-trip, plain text stays file=None ---
+    file_id = store.enqueue_outbox(db, "s1", chat_id=9, text="подпись", file="/tmp/x/report.pdf")
+    plain_id = store.enqueue_outbox(db, "s1", chat_id=9, text="просто текст")
+    rows = {r["id"]: r for r in store.pending_outbox(db)}
+    if rows[file_id]["file"] != "/tmp/x/report.pdf" or rows[file_id]["text"] != "подпись":
+        failures.append(f"outbox file row lost path/caption: {rows[file_id]}")
+    if rows[plain_id]["file"] is not None:
+        failures.append("plain outbox row must have file=None")
+
     # --- renames: same contract as outbox (queue, apply-once, backoff) ---
     db = _fresh_db()
     rename_id = store.enqueue_rename(db, "s1", chat_id=9, name="Новая тема")
