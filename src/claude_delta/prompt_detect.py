@@ -19,10 +19,28 @@ import re
 
 # The harness's TUI cursor marking the currently selected option, right
 # before a numbered choice — e.g. "❯ 1. Yes".
-_CURSOR_OPTION_RE = re.compile(r"(?m)^\s*❯\s*[1-9]\.\s+\S")
+#
+# Option number is [1-9][0-9]* (not just [1-9]) since 2026-09-27: a menu
+# with 10+ options (found live via /model, which lists 11) renders its
+# 10th+ entries as "10.", "11.", ... — the original single-digit-only
+# pattern silently failed to recognize those as option lines at all,
+# which truncated format_for_chat's forwarded list right after item 9
+# (see _OPTION_LINE_RE's use in format_for_chat: it finds the *last*
+# matching line to know where the option block ends, so missing "10."
+# entirely made "9." look like the last one). Confirmed live that the
+# cursor itself can land on a double-digit option too (arrowed down to
+# "❯ 10." in a real capture, tests/fixtures/model_switch_menu_cursor_on_10.txt).
+_CURSOR_OPTION_RE = re.compile(r"(?m)^\s*❯\s*[1-9][0-9]*\.\s+\S")
 
-# Any numbered option line, cursor or not — e.g. "  2. No".
-_OPTION_LINE_RE = re.compile(r"(?m)^\s*[❯>]?\s*[1-9]\.\s+\S")
+# Any numbered option line, cursor or not — e.g. "  2. No". Leading glyph
+# also accepts "↓"/"↑" (2026-09-27): a scrollable menu with more options
+# than fit the viewport (again, /model) marks the option nearest the
+# hidden ones with a scroll-direction arrow instead of a bare indent —
+# confirmed live ("   ↓ 10. Opus 4.6...", the option right above the
+# fold). Without this the line simply didn't match at all — same class
+# of silent truncation as the [1-9]-only digit bug above, just for a
+# different reason.
+_OPTION_LINE_RE = re.compile(r"(?m)^\s*[❯>↓↑]?\s*[1-9][0-9]*\.\s+\S")
 
 # How close to the end of the capture the option block must be to count
 # as the *current* interactive prompt rather than an already-resolved one
@@ -124,8 +142,10 @@ _CHAT_HEADER = "🔐 Подтверждение действия"
 
 # Strips the TUI cursor glyph ("❯") from an option line — over chat there
 # is no "currently selected" option, just a plain numbered list to pick
-# from by replying with a number.
-_CURSOR_GLYPH_RE = re.compile(r"[❯>]\s*(?=[1-9]\.)")
+# from by replying with a number. Also strips the "↓"/"↑" scroll-direction
+# marker (see _OPTION_LINE_RE) for the same reason: neither means
+# anything once the option list is flattened into a chat message.
+_CURSOR_GLYPH_RE = re.compile(r"[❯>↓↑]\s*(?=[1-9][0-9]*\.)")
 
 # AskUserQuestion's own harness chrome, not part of the question the user
 # wrote — auto-appended after every declared option (calibrated live
@@ -137,7 +157,7 @@ _CURSOR_GLYPH_RE = re.compile(r"[❯>]\s*(?=[1-9]\.)")
 # _LIMIT_PHRASES below) — this is fixed harness UI text, not
 # locale-varying dialog wording, and there's no structural signal that
 # reliably separates it from a genuine option otherwise.
-_META_OPTION_RE = re.compile(r"^\s*[❯>]?\s*[1-9]\.\s+(Type something\.|Chat about this)\s*$")
+_META_OPTION_RE = re.compile(r"^\s*[❯>]?\s*[1-9][0-9]*\.\s+(Type something\.|Chat about this)\s*$")
 
 
 def format_for_chat(text: str) -> str:

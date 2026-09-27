@@ -32,6 +32,8 @@ POSITIVE = [
     "bash_command_with_rule.txt",    # Bash command approval, rule line above
     "trust_folder_prompt.txt",       # one-time workspace-trust prompt
     "limit_dialog_with_overline_rule.txt",  # rule drawn with "▔", not "─"/"—"/"-"
+    "model_switch_menu.txt",         # /model, 11 options — cursor on single-digit #5
+    "model_switch_menu_cursor_on_10.txt",  # same menu, cursor arrowed down to double-digit #10
 ]
 
 NEGATIVE = [
@@ -100,6 +102,19 @@ def run():
             failures.append(f"format_for_chat dropped the options: {name}")
     if "Esc to cancel" in format_for_chat((FIXTURES / "mcp_tool_use.txt").read_text()):
         failures.append("format_for_chat kept the key-hint line")
+
+    # Regression (2026-09-27): a 10+-option menu (/model has 11) must not
+    # get truncated right after option 9 — the original [1-9]-only regex
+    # treated "10." as non-option text, so format_for_chat's "find the
+    # last option line" logic stopped one line early and dropped
+    # everything from "10." onward, silently. Both fixtures (cursor on
+    # #5, cursor arrowed down to #10) must forward the full list either way.
+    for name in ("model_switch_menu.txt", "model_switch_menu_cursor_on_10.txt"):
+        formatted = format_for_chat((FIXTURES / name).read_text())
+        if "10. Opus 4.6" not in formatted:
+            failures.append(f"format_for_chat truncated a 10+-option menu before option 10: {name}")
+        if "9.  Opus 4.7" not in formatted:
+            failures.append(f"format_for_chat lost option 9 in a 10+-option menu: {name}")
 
     # Regression: an overline-rule ("▔") above the prompt must stop the
     # backward walk just like a "─" rule does — previously it didn't,

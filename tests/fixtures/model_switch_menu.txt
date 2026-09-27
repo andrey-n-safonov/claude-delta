@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Haiku 4.5 · Claude Pro
+ ▝▝   ▝▝   ~/obsidian_vault/02 Projects/Delta Bridge
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /model
+  ⎿  Set model to Haiku 4.5 and saved as your default for new sessions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+     1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+     2.  Opus 5.5               Most capable for ambitious work
+     3.  Sonnet 5               Most efficient for everyday tasks
+     4.  Fable 5.1              For your toughest challenges
+   ❯ 5.  Haiku 4.5 ✔            Fastest for quick answers
+     6.  Opus 5                 Best for everyday, complex tasks
+     7.  Fable 5                Most capable for your hardest and longest-running tasks
+     8.  Opus 4.8               Best for everyday, complex tasks
+     9.  Opus 4.7               Best for everyday, complex tasks
+   ↓ 10. Opus 4.6               Best for everyday, complex tasks
+      … +1 model
+
+   ○ Effort not supported for Haiku 4.5
+
+   Enter to set as default · s to use this session only · Esc to cancel
