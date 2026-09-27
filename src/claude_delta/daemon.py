@@ -26,6 +26,8 @@ Configuration — environment variables:
                                  go there, see attachments.py; default: ~/.local/share/claude-delta/files)
   DELTA_FILES_MAX_MB          — larger attachments are refused with a chat notice (default: 50)
   DELTA_FILES_KEEP_DAYS       — attachments older than this are removed (default: 14)
+  DELTA_STT_IDLE_UNLOAD_SEC   — whisper model unloads after this long without a
+                                 transcription, reloads on next voice message (default: 600)
 
 Loop: every iteration (a few seconds) processes pending session_requests
 and pending outbox, then checks for new messages across all armed
@@ -63,6 +65,8 @@ FILES_DIR = os.environ.get("DELTA_FILES_DIR", attachments.DEFAULT_ROOT)
 FILES_MAX_BYTES = int(float(os.environ.get("DELTA_FILES_MAX_MB", "50")) * 1024 * 1024)
 FILES_KEEP_DAYS = float(os.environ.get("DELTA_FILES_KEEP_DAYS", "14"))
 FILES_CLEANUP_INTERVAL_SEC = 6 * 3600
+
+STT_IDLE_UNLOAD_SEC = float(os.environ.get("DELTA_STT_IDLE_UNLOAD_SEC", str(stt.IDLE_UNLOAD_SEC)))
 
 LOOP_INTERVAL_SEC = 5
 FALLBACK_RESTART_SEC = 10 * 60  # 10 minutes, see design.md
@@ -823,12 +827,6 @@ def run():
 
     log.info("старт демона, ящик=%s, peer=%s", addr, peer_addr)
 
-    # Eager, not lazy — see stt.preload docstring. Blocks startup for a
-    # few seconds (longer, once, if the model still needs downloading)
-    # instead of blocking the main loop the first time a voice message
-    # arrives, for every armed session, mid-session.
-    stt.preload()
-
     last_restart = time.time()
     last_files_cleanup = 0.0
     with Bridge(accounts_dir, addr, password, peer_addr) as bridge:
@@ -858,6 +856,8 @@ def run():
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:
                 log.exception("ошибка в цикле демона")
+
+            stt.unload_if_idle(STT_IDLE_UNLOAD_SEC)  # cheap when nothing is loaded, see stt.py
 
             if time.time() - last_files_cleanup > FILES_CLEANUP_INTERVAL_SEC:
                 try:
