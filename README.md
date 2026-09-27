@@ -15,7 +15,8 @@ Delta Chat выбран как транспорт вместо, например
 > Статус: ядро моста (демон + CLI), systemd-сервис демона и команда/skill
 > `/delta-chat` (on/off/status внутри сессии Claude Code) — реализовано и
 > проверено вживую: создание сессионного чата, отправка, приём текста,
-> голосовых и изображений (OCR).
+> голосовых, изображений (OCR) и любых других файлов (сохраняются в
+> scratchpad сессии), отправка файла из сессии в чат (`send-file`).
 >
 > **Диспетчер поверх tmux** (2026-08-10) — реализован поверх того же
 > демона: для сессий, зарегистрированных в tmux (`register-tmux`),
@@ -88,12 +89,21 @@ raw IMAP IDLE вручную не нужно.
 (`claude_delta.store`) — так исключается конфликт двух процессов за один
 account db.
 
+Везде `session_id` — необязательный позиционный аргумент, по умолчанию
+`$CLAUDE_CODE_SESSION_ID` из окружения (см. `cli._session_id`) — вызывающей
+сессии не нужно подставлять его самой:
+
 ```
-claude-delta create-session <session_id> [--name NAME]   # -> chat_id
-claude-delta register-tmux <session_id> [--target TARGET] # -> target, включает tmux-диспетчер (по умолчанию $TMUX_PANE)
-claude-delta send <session_id> <text>
-claude-delta check <session_id>                          # новые сообщения, JSON lines (не нужно для tmux-сессий — доставляет диспетчер)
-claude-delta close <session_id>
+claude-delta create-session [--name NAME] [--message TEXT]  # -> chat_id, --message обязателен по факту:
+                                                              # без первого сообщения группа не появится у собеседника
+claude-delta register-tmux [--target TARGET]  # включает tmux-диспетчер (форвардинг промптов), по умолчанию $TMUX_PANE
+claude-delta send <text>
+claude-delta send-file <путь> [подпись]       # см. ниже — файл из сессии в чат
+claude-delta rename <name>                    # переименовать групповой чат (текущая тема сессии)
+claude-delta set-mode <manual|accept-edits|plan|auto>  # переключить permission-режим панели
+claude-delta check                            # новые сообщения, JSON lines (не нужно для tmux-сессий — доставляет диспетчер)
+claude-delta close                            # уведомление + разоружение + чат в очередь на удаление
+claude-delta status                           # жив ли демон и армирована ли сессия здесь
 ```
 
 Голосовые сообщения распознаются локально через `faster-whisper` (модель
