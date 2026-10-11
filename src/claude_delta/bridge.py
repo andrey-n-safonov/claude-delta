@@ -176,7 +176,7 @@ class Bridge:
         also runs prompt detection and delivery. get_fresh_messages()
         only returns what's actually unread, account-wide.
 
-        Returns dicts {id, chat_id, text, file, file_mime, view_type} —
+        Returns dicts {id, chat_id, from_id, text, file, file_mime, view_type} —
         for voice/audio messages text is usually empty and file points to
         the locally downloaded attachment (transcribed separately, see
         stt.py). Caller is responsible for routing by chat_id.
@@ -194,6 +194,7 @@ class Bridge:
             result.append({
                 "id": m.id,
                 "chat_id": snap.chat_id,
+                "from_id": snap.from_id,
                 "text": snap.text,
                 "file": snap.file,
                 "file_mime": snap.file_mime,

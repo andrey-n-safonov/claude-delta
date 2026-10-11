@@ -473,7 +473,8 @@ def _attachment_suffix(msg: dict, sess: dict, log_label: str) -> str:
     return f" {dest} ({meta})"
 
 
-def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = None):
+def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = None,
+                   peer_contact_id: int | None = None):
     """One account-wide fetch (see Bridge.fetch_all_fresh_messages),
     routed to armed sessions by chat_id — replaces the old per-session
     chat.get_messages() loop (reliability pass 2026-08-10, see the
@@ -485,7 +486,14 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
     on a chat_id nothing ever wrote to). Also why this function can no
     longer bail out early just because there are no armed sessions: the
     control chat matters *most* exactly when nothing is armed yet (that's
-    when "/new-session" gets used)."""
+    when "/new-session" gets used).
+
+    peer_contact_id (2026-10-11): routing by chat_id alone trusted
+    whoever is a member of a session group — but any Delta Chat group
+    member can add others (incl. via the group's QR invite), and their
+    messages would then be typed straight into the tmux pane. Only
+    messages from the peer's key-contact are accepted; with the peer
+    unresolved (None) nothing is, fail closed."""
     sessions_by_chat = {s["chat_id"]: s for s in store.armed_sessions(db_path)}
     if not sessions_by_chat and control_chat_id is None:
         return
@@ -498,6 +506,10 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
             # Not an armed session's chat and not the control chat (old
             # test/closed chat) — fetch_all_fresh_messages already marked
             # it seen account-wide; nothing else to do with it here.
+            continue
+        if peer_contact_id is None or msg["from_id"] != peer_contact_id:
+            log.warning("чат %s: сообщение msg_id=%s от contact_id=%s — не peer, отброшено",
+                        chat_id, msg["id"], msg["from_id"])
             continue
         log_label = sess["session_id"] if sess else "control"
         text = msg["text"]
@@ -835,6 +847,12 @@ def run():
         # missing key-contact (no prior secure-join) shouldn't take the
         # rest of the daemon down, just the control-chat feature.
         try:
+            peer_contact_id = bridge.peer_contact().id
+            log.info("peer contact_id=%s", peer_contact_id)
+        except Exception:
+            log.exception("peer key-contact не найден — входящие сообщения не принимаются")
+            peer_contact_id = None
+        try:
             control_chat_id = bridge.control_chat_id()
             log.info("control-чат: id=%s", control_chat_id)
         except Exception:
@@ -848,7 +866,7 @@ def run():
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)  # before deletions: let a pending "session closed" notice out first
                 _process_deletions(bridge, db_path)
-                _process_inbox(bridge, db_path, control_chat_id)
+                _process_inbox(bridge, db_path, control_chat_id, peer_contact_id)
                 _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
                 if control_chat_id is not None:
                     _process_control_commands(bridge, db_path, control_chat_id)
