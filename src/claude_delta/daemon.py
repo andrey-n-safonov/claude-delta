@@ -5,7 +5,7 @@ session chat creation, sending, receiving.
 
 Configuration — environment variables:
   DELTA_ADDR, DELTA_PASSWORD  — bot mailbox
-  DELTA_PEER_ADDR             — user's address (personal account)
+  DELTA_PEER_ADDR             — user's address(es), comma-separated (personal accounts)
   DELTA_ACCOUNTS_DIR          — where deltachat-core keeps its own db
   DELTA_STORE_DB              — path to the drop-box sqlite (store.py)
   DELTA_SPAWN_BACKENDS        — control-chat "/new-session" backends, "name=cmd,..."
@@ -106,7 +106,7 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 
 # Control-chat protocol (2026-09-14, see design.md "План: control-протокол
 # через личные сообщения"): the bot's own 1:1 chat with the known peer —
-# resolved once at startup via Bridge.control_chat_id() — accepts a small
+# resolved once at startup via Bridge.control_chat_ids() (one per peer) — accepts a small
 # set of session-management commands, parsed here and never passed
 # through to any tmux pane (there isn't one for this chat_id anyway, it's
 # not in the sessions table). Same "no separate sender check" reasoning
@@ -473,14 +473,14 @@ def _attachment_suffix(msg: dict, sess: dict, log_label: str) -> str:
     return f" {dest} ({meta})"
 
 
-def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = None,
-                   peer_contact_id: int | None = None):
+def _process_inbox(bridge: Bridge, db_path: str, control_chat_ids: frozenset[int] = frozenset(),
+                   peer_contact_ids: frozenset[int] = frozenset()):
     """One account-wide fetch (see Bridge.fetch_all_fresh_messages),
     routed to armed sessions by chat_id — replaces the old per-session
     chat.get_messages() loop (reliability pass 2026-08-10, see the
     docstring on fetch_all_fresh_messages for why that scaled badly).
 
-    control_chat_id (2026-09-14): the one extra chat_id worth storing
+    control_chat_ids (2026-09-14): the extra chat_ids worth storing
     messages for even though it's never in the sessions table — without
     it, _process_control_commands would starve forever (peek_unconsumed
     on a chat_id nothing ever wrote to). Also why this function can no
@@ -488,26 +488,28 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_id: int | None = N
     control chat matters *most* exactly when nothing is armed yet (that's
     when "/new-session" gets used).
 
-    peer_contact_id (2026-10-11): routing by chat_id alone trusted
+    peer_contact_ids (2026-10-11): routing by chat_id alone trusted
     whoever is a member of a session group — but any Delta Chat group
     member can add others (incl. via the group's QR invite), and their
     messages would then be typed straight into the tmux pane. Only
-    messages from the peer's key-contact are accepted; with the peer
-    unresolved (None) nothing is, fail closed."""
+    messages from a peer's key-contact are accepted; with no peer
+    resolved (empty set) nothing is, fail closed. Both arguments are
+    sets (one control chat per peer, 2026-10-12) — membership stays O(1)
+    per message."""
     sessions_by_chat = {s["chat_id"]: s for s in store.armed_sessions(db_path)}
-    if not sessions_by_chat and control_chat_id is None:
+    if not sessions_by_chat and not control_chat_ids:
         return
 
     processed_by_chat: dict[int, list[int]] = {}
     for msg in bridge.fetch_all_fresh_messages():
         chat_id = msg["chat_id"]
         sess = sessions_by_chat.get(chat_id)
-        if sess is None and chat_id != control_chat_id:
+        if sess is None and chat_id not in control_chat_ids:
             # Not an armed session's chat and not the control chat (old
             # test/closed chat) — fetch_all_fresh_messages already marked
             # it seen account-wide; nothing else to do with it here.
             continue
-        if peer_contact_id is None or msg["from_id"] != peer_contact_id:
+        if msg["from_id"] not in peer_contact_ids:
             log.warning("чат %s: сообщение msg_id=%s от contact_id=%s — не peer, отброшено",
                         chat_id, msg["id"], msg["from_id"])
             continue
@@ -847,17 +849,17 @@ def run():
         # missing key-contact (no prior secure-join) shouldn't take the
         # rest of the daemon down, just the control-chat feature.
         try:
-            peer_contact_id = bridge.peer_contact().id
-            log.info("peer contact_id=%s", peer_contact_id)
+            peer_contact_ids = frozenset(c.id for c in bridge.peer_contacts())
+            log.info("peer contact_ids=%s", sorted(peer_contact_ids))
         except Exception:
             log.exception("peer key-contact не найден — входящие сообщения не принимаются")
-            peer_contact_id = None
+            peer_contact_ids = frozenset()
         try:
-            control_chat_id = bridge.control_chat_id()
-            log.info("control-чат: id=%s", control_chat_id)
+            control_chat_ids = frozenset(bridge.control_chat_ids())
+            log.info("control-чаты: id=%s", sorted(control_chat_ids))
         except Exception:
             log.exception("не удалось получить control-чат — команды /list-backends,/list-sessions,/delete-session,/new-session недоступны")
-            control_chat_id = None
+            control_chat_ids = frozenset()
 
         while _running:
             try:
@@ -866,9 +868,9 @@ def run():
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)  # before deletions: let a pending "session closed" notice out first
                 _process_deletions(bridge, db_path)
-                _process_inbox(bridge, db_path, control_chat_id, peer_contact_id)
+                _process_inbox(bridge, db_path, control_chat_ids, peer_contact_ids)
                 _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
-                if control_chat_id is not None:
+                for control_chat_id in control_chat_ids:
                     _process_control_commands(bridge, db_path, control_chat_id)
                 _process_tmux_delivery(db_path)  # consumes what _process_inbox stored above
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))

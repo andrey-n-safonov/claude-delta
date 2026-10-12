@@ -43,15 +43,15 @@ def main():
 
     parsed_peer = parse_peer_addr(qr)
     env_peer = os.environ.get("DELTA_PEER_ADDR")
+    env_peers = [a.strip() for a in (env_peer or "").split(",") if a.strip()]
     if parsed_peer:
         print("peer-адрес из ссылки:", parsed_peer)
-    if env_peer and parsed_peer and env_peer != parsed_peer:
+    if env_peers and parsed_peer and parsed_peer not in env_peers:
         print(
-            f"ВНИМАНИЕ: DELTA_PEER_ADDR={env_peer} не совпадает с адресом "
-            f"из ссылки ({parsed_peer}) — проверь daemon.env",
+            f"ВНИМАНИЕ: адреса из ссылки ({parsed_peer}) нет в "
+            f"DELTA_PEER_ADDR={env_peer} — проверь daemon.env",
             file=sys.stderr,
         )
-    peer_addr = env_peer or parsed_peer
 
     with Rpc(accounts_dir=ACCOUNTS_DIR) as rpc:
         deltachat = DeltaChat(rpc)
@@ -95,7 +95,7 @@ def main():
         finally:
             account.stop_io()
 
-        peer_addr = os.environ.get("DELTA_PEER_ADDR")
+        peer_addr = parsed_peer or (env_peers[0] if env_peers else None)
         if peer_addr:
             contact = account.get_contact_by_addr(peer_addr)
             print(f"get_contact_by_addr({peer_addr}):", contact)

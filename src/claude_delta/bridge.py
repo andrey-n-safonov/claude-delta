@@ -37,7 +37,9 @@ class Bridge:
         self.accounts_dir = accounts_dir
         self.bot_addr = bot_addr
         self.bot_password = bot_password
-        self.peer_addr = peer_addr
+        # Comma-separated: more than one trusted peer (2026-10-12, e.g. a
+        # second personal account while the first one is unreliable).
+        self.peer_addrs = [a.strip() for a in peer_addr.split(",") if a.strip()]
         self._rpc = None
         self._dc = None
         self._account = None
@@ -105,28 +107,38 @@ class Bridge:
     def account(self) -> Account:
         return self._account
 
-    def peer_contact(self):
-        """Returns the already-known key-contact for the user.
+    def peer_contacts(self) -> list:
+        """Returns the already-known key-contacts for every configured peer.
 
         Encrypted group chats require a key-contact (with an exchanged
         public key) — create_contact() from a bare address creates a
         plain address-contact without a key, which doesn't work for
         encrypted groups ("Only key-contacts can be added to encrypted
         chats"). The key already exists after a prior manual
-        secure-join/exchange, we just look it up.
+        secure-join/exchange, we just look it up. A peer without one yet
+        is skipped (logged), so adding an address to DELTA_PEER_ADDR
+        before its secure-join doesn't break the existing ones; raises
+        only if none resolve.
         """
-        contact = self._account.get_contact_by_addr(self.peer_addr)
-        if contact is None:
+        contacts = []
+        for addr in self.peer_addrs:
+            contact = self._account.get_contact_by_addr(addr)
+            if contact is None:
+                log.warning("нет известного key-contact для %s — нужен secure-join", addr)
+                continue
+            contacts.append(contact)
+        if not contacts:
             raise RuntimeError(
-                f"нет известного key-contact для {self.peer_addr} — "
+                f"нет известного key-contact ни для одного из {self.peer_addrs} — "
                 "нужен предварительный обмен сообщением/secure-join"
             )
-        return contact
+        return contacts
 
     def create_session_group(self, name: str) -> int:
-        """Creates a group chat for a session with the already-known user contact."""
+        """Creates a group chat for a session with every already-known peer contact."""
         chat = self._account.create_group(name)
-        chat.add_contact(self.peer_contact())
+        for contact in self.peer_contacts():
+            chat.add_contact(contact)
         return chat.id
 
     def send_text(self, chat_id: int, text: str) -> int:
@@ -146,16 +158,16 @@ class Bridge:
         chat = self._account.get_chat_by_id(chat_id)
         chat.set_name(name)
 
-    def control_chat_id(self) -> int:
-        """The 1:1 chat with the known peer — a channel distinct from any
+    def control_chat_ids(self) -> set[int]:
+        """The 1:1 chats with the known peers — a channel distinct from any
         per-session group chat, reserved for control commands (/list,
         /delete, /new — see design.md, "План: control-протокол"). Delta
-        Chat's own 1:1 chat model already guarantees only the bot and this
-        one contact can ever be members of it, which is the entire "is
-        this really the trusted peer" check for anything read from this
-        chat_id — no separate sender allowlist needed. Contact.create_chat()
+        Chat's own 1:1 chat model already guarantees only the bot and that
+        one contact can ever be members of each (the daemon additionally
+        checks the sender against the peer set, see _process_inbox).
+        Contact.create_chat()
         creates it on first call and just returns the same chat afterwards."""
-        return self.peer_contact().create_chat().id
+        return {c.create_chat().id for c in self.peer_contacts()}
 
     def delete_chat(self, chat_id: int) -> None:
         self._account.get_chat_by_id(chat_id).delete()
