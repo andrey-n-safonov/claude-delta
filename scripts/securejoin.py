@@ -2,7 +2,7 @@
 One-off maintenance script: consume a Delta Chat secure-join QR/invite
 link (from the peer's own app — Settings -> Invite via QR/link) on the
 bot account, establishing the verified key-contact the bridge needs for
-create_session_group()/peer_contact() to work.
+create_session_group()/peer_contacts() to work.
 
 Needed once per bot mailbox — after a fresh mailbox swap (see INSTALL.md/
 Delta Bridge creds.md), the bot has no key-contact for the peer yet and

@@ -134,11 +134,12 @@ class Bridge:
             )
         return contacts
 
-    def create_session_group(self, name: str) -> int:
-        """Creates a group chat for a session with every already-known peer contact."""
+    def create_session_group(self, name: str, peer_contact_id: int) -> int:
+        """Creates a group chat for a session with its one owning peer.
+        Not every peer: each would then see (and could type into) every
+        other peer's sessions (2026-10-12)."""
         chat = self._account.create_group(name)
-        for contact in self.peer_contacts():
-            chat.add_contact(contact)
+        chat.add_contact(peer_contact_id)
         return chat.id
 
     def send_text(self, chat_id: int, text: str) -> int:
@@ -158,7 +159,7 @@ class Bridge:
         chat = self._account.get_chat_by_id(chat_id)
         chat.set_name(name)
 
-    def control_chat_ids(self) -> set[int]:
+    def control_chats(self) -> dict[int, int]:
         """The 1:1 chats with the known peers — a channel distinct from any
         per-session group chat, reserved for control commands (/list,
         /delete, /new — see design.md, "План: control-протокол"). Delta
@@ -166,8 +167,11 @@ class Bridge:
         one contact can ever be members of each (the daemon additionally
         checks the sender against the peer set, see _process_inbox).
         Contact.create_chat()
-        creates it on first call and just returns the same chat afterwards."""
-        return {c.create_chat().id for c in self.peer_contacts()}
+        creates it on first call and just returns the same chat afterwards.
+
+        Returns {control chat_id: peer contact_id} — commands from a
+        control chat act on behalf of (and are scoped to) that peer."""
+        return {c.create_chat().id: c.id for c in self.peer_contacts()}
 
     def delete_chat(self, chat_id: int) -> None:
         self._account.get_chat_by_id(chat_id).delete()

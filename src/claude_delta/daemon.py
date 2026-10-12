@@ -106,7 +106,7 @@ _DELTA_CHAT_REMINDER_TAG = "[delta-chat:reminder]"
 
 # Control-chat protocol (2026-09-14, see design.md "План: control-протокол
 # через личные сообщения"): the bot's own 1:1 chat with the known peer —
-# resolved once at startup via Bridge.control_chat_ids() (one per peer) — accepts a small
+# resolved once at startup via Bridge.control_chats() (one per peer) — accepts a small
 # set of session-management commands, parsed here and never passed
 # through to any tmux pane (there isn't one for this chat_id anyway, it's
 # not in the sessions table). Same "no separate sender check" reasoning
@@ -211,13 +211,29 @@ def _handle_signal(signum, frame):
     _running = False
 
 
-def _process_session_requests(bridge: Bridge, db_path: str):
+_LAST_PEER_KEY = "last_peer_contact_id"
+
+
+def _default_peer(db_path: str, peer_contact_ids: tuple[int, ...]) -> int | None:
+    """Owner for a session armed from the terminal (no control chat to
+    tell whose it is): the peer who last wrote to the bot — that's the
+    account the user is on right now — else the first configured one."""
+    last = store.get_state(db_path, _LAST_PEER_KEY)
+    if last is not None and int(last) in peer_contact_ids:
+        return int(last)
+    return peer_contact_ids[0] if peer_contact_ids else None
+
+
+def _process_session_requests(bridge: Bridge, db_path: str, peer_contact_ids: tuple[int, ...]):
     for req in store.pending_session_requests(db_path):
         session_id, name = req["session_id"], req["name"]
         try:
-            chat_id = bridge.create_session_group(name)
-            store.fulfill_session_request(db_path, session_id, chat_id)
-            log.info("сессия %s: создан чат id=%s", session_id, chat_id)
+            peer = _default_peer(db_path, peer_contact_ids)
+            if peer is None:
+                raise RuntimeError("нет ни одного peer key-contact")
+            chat_id = bridge.create_session_group(name, peer)
+            store.fulfill_session_request(db_path, session_id, chat_id, peer)
+            log.info("сессия %s: создан чат id=%s, peer contact_id=%s", session_id, chat_id, peer)
         except Exception as e:
             store.fail_session_request(db_path, session_id, repr(e))
             log.exception("сессия %s: ошибка создания чата", session_id)
@@ -282,8 +298,8 @@ def _split_folder_and_task(rest: str) -> tuple[str, str]:
     return DEFAULT_FOLDER_NAME, rest
 
 
-def _format_session_list(db_path: str) -> str:
-    sessions = store.all_sessions(db_path)
+def _format_session_list(db_path: str, peer_contact_id: int) -> str:
+    sessions = store.all_sessions(db_path, peer_contact_id)
     if not sessions:
         return "нет ни одной сессии"
     lines = [
@@ -293,15 +309,16 @@ def _format_session_list(db_path: str) -> str:
     return "\n".join(lines)
 
 
-def _handle_delete_command(db_path: str, prefix: str) -> str:
-    sess = store.find_session_by_prefix(db_path, prefix)
+def _handle_delete_command(db_path: str, prefix: str, peer_contact_id: int) -> str:
+    sess = store.find_session_by_prefix(db_path, prefix, peer_contact_id)
     if sess is None:
         return f"не нашёл однозначную сессию по {prefix!r} — сверься с /list-sessions"
     store.enqueue_deletion(db_path, sess["session_id"], sess["chat_id"])
     return f"удаляю чат сессии {prefix} (chat_id={sess['chat_id']})"
 
 
-def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str) -> str:
+def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str,
+                        peer_contact_id: int) -> str:
     """rest is everything after the backend name — "[folder] [task]", see
     _split_folder_and_task. Both folder and task are optional independent
     of each other: "/new-session deep" (default folder, no task),
@@ -338,12 +355,12 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str) -
 
     chat_name = task[:60] if task else f"{cmd} — {session_id[:8]}"
     try:
-        chat_id = bridge.create_session_group(chat_name)
+        chat_id = bridge.create_session_group(chat_name, peer_contact_id)
     except Exception:
         log.exception("сессия %s: чат не создан, но tmux-окно уже открыто", session_id)
         return "tmux-окно поднято, но чат создать не вышло — см. лог демона (окно осталось, прибрать вручную)"
 
-    store.create_session_direct(db_path, session_id, chat_id, target)
+    store.create_session_direct(db_path, session_id, chat_id, target, peer_contact_id)
 
     if not task:
         # Nothing to type in — the pane is left exactly as the backend
@@ -396,7 +413,8 @@ _CONTROL_HELP = (
 )
 
 
-def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int):
+def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int,
+                              peer_contact_id: int):
     """Control-chat command dispatcher — see the module-level comment
     above _LIST_BACKENDS_COMMAND_RE for the trust model. Runs
     independently of the armed_sessions loop that every other _process_*
@@ -414,12 +432,12 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
             elif _LIST_FOLDERS_COMMAND_RE.match(text):
                 reply = _format_folder_list()
             elif _LIST_SESSIONS_COMMAND_RE.match(text):
-                reply = _format_session_list(db_path)
+                reply = _format_session_list(db_path, peer_contact_id)
             elif match := _DELETE_SESSION_COMMAND_RE.match(text):
-                reply = _handle_delete_command(db_path, match.group(1))
+                reply = _handle_delete_command(db_path, match.group(1), peer_contact_id)
             elif match := _NEW_SESSION_COMMAND_RE.match(text):
                 rest = (match.group(2) or "").strip()
-                reply = _handle_new_command(bridge, db_path, match.group(1), rest)
+                reply = _handle_new_command(bridge, db_path, match.group(1), rest, peer_contact_id)
             else:
                 reply = _CONTROL_HELP
         except Exception:
@@ -495,7 +513,10 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_ids: frozenset[int
     messages from a peer's key-contact are accepted; with no peer
     resolved (empty set) nothing is, fail closed. Both arguments are
     sets (one control chat per peer, 2026-10-12) — membership stays O(1)
-    per message."""
+    per message. A session chat additionally accepts only its own peer
+    (sessions.peer_contact_id; NULL on legacy rows = any peer). The last
+    accepted sender is remembered as the default owner for sessions
+    armed from the terminal (see _default_peer)."""
     sessions_by_chat = {s["chat_id"]: s for s in store.armed_sessions(db_path)}
     if not sessions_by_chat and not control_chat_ids:
         return
@@ -509,10 +530,12 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_ids: frozenset[int
             # test/closed chat) — fetch_all_fresh_messages already marked
             # it seen account-wide; nothing else to do with it here.
             continue
-        if msg["from_id"] not in peer_contact_ids:
-            log.warning("чат %s: сообщение msg_id=%s от contact_id=%s — не peer, отброшено",
+        owner = sess.get("peer_contact_id") if sess else None
+        if msg["from_id"] not in peer_contact_ids or (owner is not None and msg["from_id"] != owner):
+            log.warning("чат %s: сообщение msg_id=%s от contact_id=%s — не peer этого чата, отброшено",
                         chat_id, msg["id"], msg["from_id"])
             continue
+        store.set_state(db_path, _LAST_PEER_KEY, str(msg["from_id"]))
         log_label = sess["session_id"] if sess else "control"
         text = msg["text"]
         if msg["view_type"] in VOICE_VIEW_TYPES and msg["file"]:
@@ -849,29 +872,33 @@ def run():
         # missing key-contact (no prior secure-join) shouldn't take the
         # rest of the daemon down, just the control-chat feature.
         try:
-            peer_contact_ids = frozenset(c.id for c in bridge.peer_contacts())
-            log.info("peer contact_ids=%s", sorted(peer_contact_ids))
+            # Ordered as in DELTA_PEER_ADDR — the first one is the
+            # fallback owner, see _default_peer.
+            peer_order = tuple(c.id for c in bridge.peer_contacts())
+            log.info("peer contact_ids=%s", list(peer_order))
         except Exception:
             log.exception("peer key-contact не найден — входящие сообщения не принимаются")
-            peer_contact_ids = frozenset()
+            peer_order = ()
+        peer_contact_ids = frozenset(peer_order)
         try:
-            control_chat_ids = frozenset(bridge.control_chat_ids())
-            log.info("control-чаты: id=%s", sorted(control_chat_ids))
+            control_chats = bridge.control_chats()
+            log.info("control-чаты (chat_id: peer contact_id): %s", control_chats)
         except Exception:
             log.exception("не удалось получить control-чат — команды /list-backends,/list-sessions,/delete-session,/new-session недоступны")
-            control_chat_ids = frozenset()
+            control_chats = {}
+        control_chat_ids = frozenset(control_chats)
 
         while _running:
             try:
-                _process_session_requests(bridge, db_path)
+                _process_session_requests(bridge, db_path, peer_order)
                 _process_renames(bridge, db_path)
                 _process_tmux_prompts(db_path)  # may add to outbox — before _process_outbox
                 _process_outbox(bridge, db_path)  # before deletions: let a pending "session closed" notice out first
                 _process_deletions(bridge, db_path)
                 _process_inbox(bridge, db_path, control_chat_ids, peer_contact_ids)
                 _process_mode_commands(db_path)  # claims /mode messages before regular delivery below
-                for control_chat_id in control_chat_ids:
-                    _process_control_commands(bridge, db_path, control_chat_id)
+                for control_chat_id, control_peer in control_chats.items():
+                    _process_control_commands(bridge, db_path, control_chat_id, control_peer)
                 _process_tmux_delivery(db_path)  # consumes what _process_inbox stored above
                 sleepinhibit.update(should_hold=bool(store.armed_sessions(db_path)))
             except Exception:

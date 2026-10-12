@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS deletions (
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+
+-- Small daemon-owned key/value state that must survive restarts.
+CREATE TABLE IF NOT EXISTS state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -90,6 +96,10 @@ _MIGRATIONS = (
     # Absolute path of a file to send to the chat (2026-09-26); text is
     # then its caption, possibly empty. NULL = plain text message.
     "ALTER TABLE outbox ADD COLUMN file TEXT",
+    # Owning peer (2026-10-12): with several DELTA_PEER_ADDR entries a
+    # session's group holds only this one contact, and only its messages
+    # are accepted. NULL = legacy row from before, any peer accepted.
+    "ALTER TABLE sessions ADD COLUMN peer_contact_id INTEGER",
 )
 
 
@@ -151,7 +161,8 @@ def pending_session_requests(db_path: str):
         return [dict(r) for r in rows]
 
 
-def fulfill_session_request(db_path: str, session_id: str, chat_id: int) -> None:
+def fulfill_session_request(db_path: str, session_id: str, chat_id: int,
+                            peer_contact_id: int | None = None) -> None:
     with connect(db_path) as conn:
         now = time.time()
         conn.execute(
@@ -159,9 +170,9 @@ def fulfill_session_request(db_path: str, session_id: str, chat_id: int) -> None
             (chat_id, session_id),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO sessions (session_id, chat_id, status, created_at, updated_at) "
-            "VALUES (?, ?, 'armed', ?, ?)",
-            (session_id, chat_id, now, now),
+            "INSERT OR REPLACE INTO sessions (session_id, chat_id, status, peer_contact_id, created_at, updated_at) "
+            "VALUES (?, ?, 'armed', ?, ?, ?)",
+            (session_id, chat_id, peer_contact_id, now, now),
         )
         conn.commit()
 
@@ -202,34 +213,42 @@ def disarm_session(db_path: str, session_id: str) -> None:
         conn.commit()
 
 
-def all_sessions(db_path: str):
+def all_sessions(db_path: str, peer_contact_id: int | None = None):
     """Every known session regardless of status — for the control-chat
     "/list" command, which should surface disarmed sessions too (unlike
     armed_sessions(), which is deliberately scoped to what the dispatcher
     loop acts on, not to what a human asking "what do I have" wants to
-    see)."""
+    see).
+
+    peer_contact_id narrows it to that peer's sessions plus legacy
+    ownerless ones — one peer's control chat must not list another's."""
     with connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM sessions ORDER BY created_at DESC"
-        ).fetchall()
+        query, params = "SELECT * FROM sessions", []
+        if peer_contact_id is not None:
+            query += " WHERE peer_contact_id = ? OR peer_contact_id IS NULL"
+            params.append(peer_contact_id)
+        rows = conn.execute(query + " ORDER BY created_at DESC", params).fetchall()
         return [dict(r) for r in rows]
 
 
-def find_session_by_prefix(db_path: str, prefix: str):
+def find_session_by_prefix(db_path: str, prefix: str, peer_contact_id: int | None = None):
     """Resolves a short, phone-keyboard-typeable prefix (what "/list"
     shows — see daemon._format_session_list) to exactly one session row,
     for the control-chat "/delete" command. A full session_id is a uuid4,
     impractical to type on a phone. Returns None on zero or on more than
     one match — an ambiguous prefix refuses instead of guessing which
-    chat to delete."""
+    chat to delete. peer_contact_id scopes it the same way as all_sessions."""
     with connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM sessions WHERE session_id LIKE ? || '%'", (prefix,)
-        ).fetchall()
+        query, params = "SELECT * FROM sessions WHERE session_id LIKE ? || '%'", [prefix]
+        if peer_contact_id is not None:
+            query += " AND (peer_contact_id = ? OR peer_contact_id IS NULL)"
+            params.append(peer_contact_id)
+        rows = conn.execute(query, params).fetchall()
         return dict(rows[0]) if len(rows) == 1 else None
 
 
-def create_session_direct(db_path: str, session_id: str, chat_id: int, tmux_target: str) -> None:
+def create_session_direct(db_path: str, session_id: str, chat_id: int, tmux_target: str,
+                          peer_contact_id: int | None = None) -> None:
     """Registers a brand-new session in one shot, already 'armed' with its
     tmux pane bound. Used only when the DAEMON itself spawns both the
     tmux pane and the chat (control-chat "/new" — see daemon._handle_new)
@@ -240,9 +259,9 @@ def create_session_direct(db_path: str, session_id: str, chat_id: int, tmux_targ
     with connect(db_path) as conn:
         now = time.time()
         conn.execute(
-            "INSERT INTO sessions (session_id, chat_id, status, tmux_target, created_at, updated_at) "
-            "VALUES (?, ?, 'armed', ?, ?, ?)",
-            (session_id, chat_id, tmux_target, now, now),
+            "INSERT INTO sessions (session_id, chat_id, status, tmux_target, peer_contact_id, created_at, updated_at) "
+            "VALUES (?, ?, 'armed', ?, ?, ?, ?)",
+            (session_id, chat_id, tmux_target, peer_contact_id, now, now),
         )
         conn.commit()
 
@@ -282,6 +301,20 @@ def rearm_session(db_path: str, session_id: str) -> int | None:
         )
         conn.commit()
         return row["chat_id"]
+
+
+# --- Daemon key/value state ---
+
+def get_state(db_path: str, key: str) -> str | None:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def set_state(db_path: str, key: str, value: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
 
 
 # --- tmux dispatcher (session_id <-> tmux pane target) ---

@@ -185,6 +185,27 @@ def run():
     if store.find_session_by_prefix(db, "zzz") is not None:
         failures.append("find_session_by_prefix should return None for no match")
 
+    # Per-peer scoping (2026-10-12): a peer sees its own + legacy ownerless sessions only
+    db = _fresh_db()
+    store.create_session_direct(db, "aaaa0000-0000-0000-0000-000000000000", chat_id=1, tmux_target="%1", peer_contact_id=10)
+    store.create_session_direct(db, "bbbb0000-0000-0000-0000-000000000000", chat_id=2, tmux_target="%2", peer_contact_id=11)
+    store.create_session_direct(db, "cccc0000-0000-0000-0000-000000000000", chat_id=3, tmux_target="%3")
+    got = sorted(s["chat_id"] for s in store.all_sessions(db, peer_contact_id=10))
+    if got != [1, 3]:
+        failures.append(f"all_sessions(peer=10) leaked another peer's session: {got}")
+    if len(store.all_sessions(db)) != 3:
+        failures.append("all_sessions() without a peer must list everything")
+    if store.find_session_by_prefix(db, "bbbb", peer_contact_id=10) is not None:
+        failures.append("find_session_by_prefix let a peer resolve another peer's session")
+    store.request_session(db, "dddd0000-0000-0000-0000-000000000000", "x")
+    store.fulfill_session_request(db, "dddd0000-0000-0000-0000-000000000000", chat_id=4, peer_contact_id=11)
+    if store.get_session(db, "dddd0000-0000-0000-0000-000000000000")["peer_contact_id"] != 11:
+        failures.append("fulfill_session_request did not store the owning peer")
+    store.set_state(db, "k", "1")
+    store.set_state(db, "k", "2")
+    if store.get_state(db, "k") != "2" or store.get_state(db, "missing") is not None:
+        failures.append("get_state/set_state round-trip broken")
+
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
