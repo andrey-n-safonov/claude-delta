@@ -10,7 +10,7 @@ Configuration — environment variables:
   DELTA_STORE_DB              — path to the drop-box sqlite (store.py)
   DELTA_SPAWN_BACKENDS        — control-chat "/new-session" backends, "name=cmd,..."
                                  (default: proxy=claude-proxy,deep=claude-deep,
-                                 mimo=claude-mimo — this deployment's own
+                                 mimo=claude-mimo,kimi=claude-kimi — this deployment's own
                                  wrapper scripts, override or clear for another)
   DELTA_SPAWN_FOLDERS         — control-chat "/new-session"/"/list-folders" working
                                  directories, "name=path,..." (default: vault=~/obsidian_vault
@@ -147,13 +147,13 @@ def _parse_name_value_pairs(spec: str) -> dict[str, str]:
 # control-chat "/new-session" command, and the actual command each name runs.
 # Each one carries its own CLAUDE_CONFIG_DIR (this daemon's default,
 # battle-tested locally: proxy -> ~/.claude, deep -> ~/.claude-deepseek,
-# mimo -> ~/.claude-mimo) — spawning the wrapper *script* by name here,
+# mimo -> ~/.claude-mimo, kimi -> ~/.claude-kimi) — spawning the wrapper *script* by name here,
 # never `claude` with flags reproduced in this file, so a config change
 # in one wrapper (model, proxy, env) never needs mirroring here. Override
 # via DELTA_SPAWN_BACKENDS in the env file for a different deployment
 # (different wrapper names, or none at all) without touching source.
 _BACKENDS = _parse_name_value_pairs(os.environ.get(
-    "DELTA_SPAWN_BACKENDS", "proxy=claude-proxy,deep=claude-deep,mimo=claude-mimo",
+    "DELTA_SPAWN_BACKENDS", "proxy=claude-proxy,deep=claude-deep,mimo=claude-mimo,kimi=claude-kimi",
 ))
 
 # Working directories "/new-session" can spawn into, by name — this
