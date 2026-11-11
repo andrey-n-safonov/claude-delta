@@ -135,6 +135,37 @@ def run():
         failures.append("extract_limit_notice dropped the actual notice line")
     if not format_limit_notice(banner).startswith("⏳"):
         failures.append("format_limit_notice missing its header")
+
+    # Kimi rejects requests after its five-hour quota is exhausted. tmux
+    # wraps this long error onto two lines: the old line-only extractor
+    # dropped the reset explanation and the subscription URL, and labelled
+    # the provider as Claude. Forward a short actionable Russian summary.
+    kimi = (FIXTURES / "kimi_429_usage_limit.txt").read_text()
+    if not is_limit_notice(kimi):
+        failures.append("is_limit_notice missed Kimi's wrapped 429 quota error")
+    if is_permission_prompt(kimi):
+        failures.append("is_permission_prompt false-positived on Kimi's 429 quota error")
+    kimi_formatted = format_limit_notice(kimi)
+    for expected in (
+        "⏳ Kimi: исчерпан 5-часовой лимит",
+        "ошибкой 429",
+        "конце текущего 5-часового окна",
+        "точное время сброса Kimi не сообщает",
+        "другим бэкендом",
+        "https://www.kimi.com/settings/subscription?tab=quota",
+    ):
+        if expected not in kimi_formatted:
+            failures.append(f"Kimi quota summary missing {expected!r}")
+    if "API Error:" in kimi_formatted:
+        failures.append("Kimi quota summary leaked the raw English error")
+
+    # A narrower pane can wrap inside the phrase "usage limit" itself.
+    kimi_narrow = kimi.replace("5-hour usage limit", "5-hour usage\n  limit")
+    if not is_limit_notice(kimi_narrow):
+        failures.append("limit detection failed when tmux split 'usage limit'")
+    if format_limit_notice(kimi_narrow) != kimi_formatted:
+        failures.append("Kimi quota summary depends on tmux line wrapping")
+
     for name in POSITIVE:
         if is_limit_notice((FIXTURES / name).read_text()):
             failures.append(f"is_limit_notice false-positived on a permission prompt: {name}")

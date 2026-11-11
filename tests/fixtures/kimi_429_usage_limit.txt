@@ -1,0 +1,12 @@
+  Thought for 13s, read 1 file
+
+● API Error: Request rejected (429) · You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan:
+  https://www.kimi.com/settings/subscription?tab=quota
+
+✻ Crunched for 3m 14s · done 14:17
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+   omni055 │ k3.1-pro[1m] │ ctx: ░░░░░░░░░░ 7% │ 📁 Pirelli
+  ⏵⏵ auto mode on (shift+tab to cycle)

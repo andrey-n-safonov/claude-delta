@@ -234,12 +234,36 @@ _LIMIT_PHRASES = (
 )
 
 
+def _normalized_limit_tail(text: str) -> str:
+    # tmux wraps long API errors at the pane width. Normalize whitespace so
+    # a phrase remains recognizable even when the wrap splits the phrase
+    # itself, not just the message after it.
+    return re.sub(r"\s+", " ", "\n".join(_tail_lines(text))).strip()
+
+
+def _is_kimi_quota_notice(text: str) -> bool:
+    tail = _normalized_limit_tail(text).lower()
+    return (
+        "api error: request rejected (429)" in tail
+        and "5-hour usage limit" in tail
+    )
+
+
+_KIMI_LIMIT_KEY = "kimi:429:5-hour usage limit"
+_KIMI_QUOTA_URL = "https://www.kimi.com/settings/subscription?tab=quota"
+
+
 def is_limit_notice(text: str) -> bool:
-    tail = "\n".join(_tail_lines(text)).lower()
+    tail = _normalized_limit_tail(text).lower()
     return any(p in tail for p in _LIMIT_PHRASES)
 
 
 def extract_limit_notice(text: str) -> str:
+    if _is_kimi_quota_notice(text):
+        # Stable dedup key: the same quota error can occur after several
+        # different prompts, and the formatted message below is deliberately
+        # identical for all of them.
+        return _KIMI_LIMIT_KEY
     return "\n".join(
         line.strip() for line in _tail_lines(text)
         if any(p in line.lower() for p in _LIMIT_PHRASES)
@@ -247,7 +271,21 @@ def extract_limit_notice(text: str) -> str:
 
 
 _LIMIT_HEADER = "⏳ Лимит сессии Claude Code"
+_KIMI_LIMIT_HEADER = "⏳ Kimi: исчерпан 5-часовой лимит"
 
 
 def format_limit_notice(text: str) -> str:
+    if _is_kimi_quota_notice(text):
+        url_match = re.search(
+            r"https://www\.kimi\.com/\S+", "\n".join(_tail_lines(text))
+        )
+        url = url_match.group(0) if url_match else _KIMI_QUOTA_URL
+        return (
+            f"{_KIMI_LIMIT_HEADER}\n\n"
+            "API отклоняет запросы этой сессии с ошибкой 429. Квота сбросится "
+            "в конце текущего 5-часового окна; точное время сброса Kimi не сообщает.\n\n"
+            "Продолжить сейчас можно с другим бэкендом либо после покупки "
+            "дополнительного лимита или смены тарифа:\n"
+            f"{url}"
+        )
     return f"{_LIMIT_HEADER}\n\n{extract_limit_notice(text)}"
