@@ -5,14 +5,15 @@ CLI for the Claude Code session: talks only to the sqlite drop-box
 
 Commands:
   create-session [session_id] [--name NAME] [--message TEXT]  -> prints chat_id
-  register-tmux [session_id] [--target TARGET]  -> prints target (defaults
-      to $TMUX_PANE) — turns on the tmux dispatcher for the session:
+  register [session_id] [--target TARGET]       -> prints target (defaults
+      to $HERDR_PANE_ID / $TMUX_PANE; alias: register-tmux) — turns on the
+      pane dispatcher for the session (herdr or tmux, see mux.py):
       permission prompts get forwarded to the chat, replies get injected
-      back via tmux send-keys, without any action from the session's code
+      back via send-keys, without any action from the session's code
       (see daemon.py, _process_tmux_prompts/_process_tmux_delivery)
   send [session_id] <text>
   rename [session_id] <name>                   -> renames the group chat (session topic changed)
-  cycle-mode [session_id]                     -> presses Shift-Tab in the session's tmux pane
+  cycle-mode [session_id]                     -> presses Shift-Tab in the session's pane
       (the harness's own permission-mode cycle), prints the resulting status line
   set-mode [session_id] <manual|auto|plan>    -> presses Shift-Tab repeatedly (bounded) until
       that mode is reached, prints the mode actually reached (exit 1 if it never got there)
@@ -38,7 +39,7 @@ import os
 import sys
 import time
 
-from . import store, tmux
+from . import mux, store
 
 # Absolute default, not "./bridge.sqlite3" — this is the one fixed
 # deployment path on every host (see INSTALL.md), and depending on cwd
@@ -128,11 +129,11 @@ def cmd_register_tmux(args):
     if not sess:
         print("нет такой сессии — сначала create-session", file=sys.stderr)
         return 1
-    target = args.target or os.environ.get("TMUX_PANE")
+    target = args.target or mux.target_from_env()
     if not target:
         print(
-            "не в tmux и --target не передан — permission-промпты форвардиться не будут "
-            "(нужен $TMUX_PANE или явный --target)",
+            "не в herdr/tmux и --target не передан — permission-промпты форвардиться не будут "
+            "(нужен $HERDR_PANE_ID, $TMUX_PANE или явный --target)",
             file=sys.stderr,
         )
         return 1
@@ -190,7 +191,7 @@ def cmd_cycle_mode(args):
     keybinding for cycling its permission mode. Needs a tmux
     registration (the pane to press the key in); doesn't need the
     session to be armed in Delta Chat at all, this never touches the
-    outbox/daemon — see tmux.cycle_permission_mode's docstring for why
+    outbox/daemon — see mux.cycle_permission_mode's docstring for why
     it's a single hardcoded key rather than a generic "send any key"
     primitive.
 
@@ -205,17 +206,17 @@ def cmd_cycle_mode(args):
         return 1
     target = sess.get("tmux_target")
     if not target:
-        print("сессия не зарегистрирована в tmux — сначала register-tmux", file=sys.stderr)
+        print("сессия не привязана к панели — сначала register", file=sys.stderr)
         return 1
-    tmux.cycle_permission_mode(target)
+    mux.cycle_permission_mode(target)
     time.sleep(0.3)  # let the harness redraw the status line before we capture it
-    tail = tmux.capture_pane(target).rstrip().splitlines()[-3:]
+    tail = mux.capture_pane(target).rstrip().splitlines()[-3:]
     print("\n".join(tail))
     return 0
 
 
 def cmd_set_mode(args):
-    """Like cycle-mode, but drives tmux.cycle_to_mode() (multi-press,
+    """Like cycle-mode, but drives mux.cycle_to_mode() (multi-press,
     self-correcting) instead of a single Shift-Tab — for a session that
     knows exactly which mode it wants (manual/auto/plan), not just "cycle
     once and see". Prefer this over cycle-mode for anything session-
@@ -232,13 +233,13 @@ def cmd_set_mode(args):
         return 1
     target = sess.get("tmux_target")
     if not target:
-        print("сессия не зарегистрирована в tmux — сначала register-tmux", file=sys.stderr)
+        print("сессия не привязана к панели — сначала register", file=sys.stderr)
         return 1
     want = args.target.lower()
-    if want not in tmux._MODE_MARKERS:
-        print(f"неизвестный режим {want!r} — есть {', '.join(tmux._MODE_MARKERS)}", file=sys.stderr)
+    if want not in mux._MODE_MARKERS:
+        print(f"неизвестный режим {want!r} — есть {', '.join(mux._MODE_MARKERS)}", file=sys.stderr)
         return 1
-    reached = tmux.cycle_to_mode(target, want)
+    reached = mux.cycle_to_mode(target, want)
     print(reached or "неизвестно")
     return 0 if reached == want else 1
 
@@ -307,10 +308,13 @@ def main():
     p.add_argument("--message", help="первое сообщение — без него чат не появится у собеседника")
     p.set_defaults(func=cmd_create_session)
 
-    p = sub.add_parser("register-tmux")
+    # "register-tmux" is the pre-herdr name, kept so existing skills,
+    # allow-rules and muscle memory keep working.
+    p = sub.add_parser("register", aliases=["register-tmux"])
     p.add_argument("session_id", nargs="?", default=None,
                     help="по умолчанию — $CLAUDE_CODE_SESSION_ID из окружения")
-    p.add_argument("--target", help="tmux pane-id, по умолчанию $TMUX_PANE")
+    p.add_argument("--target", help="панель: herdr:<pane-id> или tmux pane-id; "
+                                    "по умолчанию из $HERDR_PANE_ID / $TMUX_PANE")
     p.set_defaults(func=cmd_register_tmux)
 
     p = sub.add_parser("send")

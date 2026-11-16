@@ -23,7 +23,7 @@ itself is Claude Code's to manage — cleanup() never touches it.
 File name: <msg_id>_<sanitized-name>. msg_id prefix makes
 names unique without overwrite checks; sanitized name has no spaces or
 shell/path metacharacters, because the path is injected into the pane as
-plain typed text (newlines are collapsed there, see tmux.send_keys) and
+plain typed text (newlines are collapsed there, see mux.send_keys) and
 an unquoted path with a space would split into two arguments.
 """
 import logging

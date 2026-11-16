@@ -320,7 +320,8 @@ def set_state(db_path: str, key: str, value: str) -> None:
 # --- tmux dispatcher (session_id <-> tmux pane target) ---
 
 def register_tmux(db_path: str, session_id: str, target: str) -> None:
-    """Binds a session to a tmux pane (pane-id, e.g. '%12').
+    """Binds a session to a pane target (mux.py format: tmux '%12' or
+    'herdr:w1:p3'; the column name predates herdr).
 
     Resets last_prompt_hash/last_limit_hash — new pane, detection starts
     fresh.
@@ -329,6 +330,18 @@ def register_tmux(db_path: str, session_id: str, target: str) -> None:
         conn.execute(
             "UPDATE sessions SET tmux_target = ?, last_prompt_hash = NULL, "
             "last_limit_hash = NULL, updated_at = ? WHERE session_id = ?",
+            (target, time.time(), session_id),
+        )
+        conn.commit()
+
+
+def retarget(db_path: str, session_id: str, target: str) -> None:
+    """Same pane, new id (herdr `pane move`, see mux.relocate) — unlike
+    register_tmux keeps the dedup hashes: the screen didn't change, a
+    prompt already forwarded must not be forwarded again."""
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET tmux_target = ?, updated_at = ? WHERE session_id = ?",
             (target, time.time(), session_id),
         )
         conn.commit()

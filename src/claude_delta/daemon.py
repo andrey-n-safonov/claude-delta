@@ -45,7 +45,7 @@ import sys
 import time
 import uuid
 
-from . import attachments, ocr, sleepinhibit, store, stt, tmux
+from . import attachments, mux, ocr, sleepinhibit, store, stt
 from .bridge import Bridge
 from .prompt_detect import (
     extract_context,
@@ -88,7 +88,7 @@ MODE_CYCLE_MAX_PRESSES = 6  # one full lap of the 4-state ring is 4, plus margin
 
 # Sent as its own injected line right after every delivered batch (never
 # merged into the delivered text itself — that stays verbatim, see
-# tmux.send_keys). Long sessions lose track of the standing /delta-chat
+# mux.send_keys). Long sessions lose track of the standing /delta-chat
 # rule (context compaction, or it just wasn't salient when the reply
 # actually mattered) and answer normally instead of via `send` — the
 # reply then never reaches the phone. Repeating the rule at the moment
@@ -170,7 +170,7 @@ _FOLDERS = _parse_name_value_pairs(os.environ.get(
 ))
 DEFAULT_FOLDER_NAME = os.environ.get("DELTA_SPAWN_DEFAULT_FOLDER", "vault")
 
-# Upper bound on tmux.wait_ready() after opening a fresh pane — see its
+# Upper bound on mux.wait_ready() after opening a fresh pane — see its
 # docstring for why this is a poll, not a sleep. A pane that never
 # becomes ready within this bound (dead backend, bad API key, network
 # down) gets reported back to the control chat instead of typed into blind.
@@ -348,17 +348,19 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str,
     cwd_arg = shlex.quote(os.path.expanduser(cwd))
     spawn_cmd = f"cd {cwd_arg} && {cmd} --session-id {session_id}"
     try:
-        target = tmux.spawn_session(spawn_cmd, name=f"delta-{session_id[:8]}")
+        mux_name = mux.default_backend().NAME
+        target = mux.spawn_session(spawn_cmd, name=f"delta-{session_id[:8]}")
     except Exception:
-        log.exception("сессия %s: не удалось поднять tmux-сессию (%s)", session_id, cmd)
-        return "не получилось поднять новую сессию (tmux) — см. лог демона"
+        log.exception("сессия %s: не удалось поднять панель (%s, DELTA_MUX=%s)",
+                      session_id, cmd, os.environ.get("DELTA_MUX", "tmux"))
+        return "не получилось поднять новую сессию (см. DELTA_MUX и лог демона)"
 
     chat_name = task[:60] if task else f"{cmd} — {session_id[:8]}"
     try:
         chat_id = bridge.create_session_group(chat_name, peer_contact_id)
     except Exception:
-        log.exception("сессия %s: чат не создан, но tmux-окно уже открыто", session_id)
-        return "tmux-окно поднято, но чат создать не вышло — см. лог демона (окно осталось, прибрать вручную)"
+        log.exception("сессия %s: чат не создан, но панель %s уже открыта", session_id, target)
+        return f"панель поднята ({mux_name}), но чат создать не вышло — см. лог демона (панель осталась, прибрать вручную)"
 
     store.create_session_direct(db_path, session_id, chat_id, target, peer_contact_id)
 
@@ -373,12 +375,12 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str,
         return f"поднимаю {cmd} в {folder_name}, session={session_id[:8]}, без задачи — пиши прямо в её чат"
 
     # Block here until the pane's status line proves the TUI is actually
-    # reading keystrokes (see tmux.wait_ready) — typing blind into a pane
+    # reading keystrokes (see mux.wait_ready) — typing blind into a pane
     # that hasn't switched stdin to raw mode yet risked losing the first
     # message outright (see design.md). This holds up the daemon's main
     # loop for the wait, same trade-off cycle_to_mode already makes
     # elsewhere in this codebase for tmux interactions.
-    if not tmux.wait_ready(target, timeout_sec=SPAWN_READY_TIMEOUT_SEC):
+    if not mux.wait_ready(target, timeout_sec=SPAWN_READY_TIMEOUT_SEC):
         log.warning("сессия %s: панель %s не отдала признаков готовности за %sс",
                      session_id, target, SPAWN_READY_TIMEOUT_SEC)
         store.enqueue_outbox(
@@ -389,7 +391,7 @@ def _handle_new_command(bridge: Bridge, db_path: str, backend: str, rest: str,
         return f"session={session_id[:8]}: панель не ответила за {SPAWN_READY_TIMEOUT_SEC:.0f}с — см. чат"
 
     try:
-        tmux.send_keys(target, task)
+        mux.send_keys(target, task)
     except Exception:
         log.exception("сессия %s: чат и окно созданы, но задачу напечатать не вышло", session_id)
         store.enqueue_outbox(
@@ -441,7 +443,7 @@ def _process_control_commands(bridge: Bridge, db_path: str, control_chat_id: int
             else:
                 reply = _CONTROL_HELP
         except Exception:
-            # Defense in depth on top of tmux.wait_ready's own fix
+            # Defense in depth on top of mux.wait_ready's own fix
             # (2026-09-14): whatever the cause, an unhandled exception
             # here must never leave the message unconsumed — that's what
             # turned one bad "/new-session" into a spawn-a-pane-every-tick retry
@@ -476,7 +478,7 @@ def _attachment_suffix(msg: dict, sess: dict, log_label: str) -> str:
     look to the user like the session ignored it."""
     src = msg["file"]
     try:
-        cwd = tmux.pane_path(sess["tmux_target"]) if sess.get("tmux_target") else None
+        cwd = mux.pane_path(sess["tmux_target"]) if sess.get("tmux_target") else None
         dest_dir = attachments.session_dir(sess["session_id"], cwd, FILES_DIR, msg["chat_id"])
         dest = attachments.save(src, dest_dir, msg["id"], FILES_MAX_BYTES)
     except attachments.TooLarge as e:
@@ -576,9 +578,26 @@ def _process_inbox(bridge: Bridge, db_path: str, control_chat_ids: frozenset[int
             log.exception("чат %s: ошибка удаления обработанных сообщений", chat_id)
 
 
+def _live_target(db_path: str, sess: dict) -> str | None:
+    """The session's pane target if the pane is still there — possibly
+    under a new id, re-stored here (herdr `pane move` re-ids a pane, see
+    mux.relocate) — or None when it's really gone. Only the two
+    dispatcher loops that tear a session down on None use this; nothing
+    else may decide a pane is dead."""
+    target = sess["tmux_target"]
+    if mux.pane_alive(target):
+        return target
+    moved = mux.relocate(target, sess["session_id"])
+    if moved and moved != target and mux.pane_alive(moved):
+        log.info("сессия %s: панель переехала %s -> %s", sess["session_id"], target, moved)
+        store.retarget(db_path, sess["session_id"], moved)
+        return moved
+    return None
+
+
 def _clear_pane_state(db_path: str, session_id: str, chat_id: int):
-    """A session's tmux pane was confirmed gone (tmux.pane_alive() ==
-    False, the only condition either call site below uses this under) —
+    """A session's pane was confirmed gone (_live_target() is None, the
+    only condition either call site below uses this under) —
     disarms it and queues its chat for deletion, on top of dropping every
     tmux-registration-scoped bit of state (both dedup hashes, both
     stability-pending entries).
@@ -610,13 +629,15 @@ def _process_tmux_prompts(db_path: str):
             continue
         session_id, chat_id = sess["session_id"], sess["chat_id"]
 
-        if not tmux.pane_alive(target):
-            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат", session_id, target)
+        target = _live_target(db_path, sess)
+        if target is None:
+            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат",
+                     session_id, sess["tmux_target"])
             _clear_pane_state(db_path, session_id, chat_id)
             continue
 
         try:
-            text = tmux.capture_pane(target)
+            text = mux.capture_pane(target)
         except Exception:
             log.exception("сессия %s: ошибка capture-pane на %s", session_id, target)
             continue
@@ -720,7 +741,7 @@ def _process_tmux_prompts(db_path: str):
 def _process_mode_commands(db_path: str):
     """Intercepts /mode <target> chat messages before regular tmux
     delivery would type them into the pane as a normal message — handled
-    entirely here instead, via tmux.cycle_to_mode(), and answered with a
+    entirely here instead, via mux.cycle_to_mode(), and answered with a
     chat reply (never injected into the pane).
 
     This exists specifically to keep the running Claude Code session out
@@ -728,7 +749,7 @@ def _process_mode_commands(db_path: str):
     on Plan Mode gets gated by the harness on its very next tool call,
     turning one mode switch into an expensive forced ExitPlanMode
     round-trip (confirmed live, repeatedly, 2026-09-08 — see journal).
-    The daemon is a plain process with no such gate; tmux.cycle_to_mode()
+    The daemon is a plain process with no such gate; mux.cycle_to_mode()
     can press through Plan Mode as many times as it needs and only ever
     reports the final state once it's done, so the session's next tool
     call (whenever that happens) sees a settled mode, never a transient
@@ -742,7 +763,7 @@ def _process_mode_commands(db_path: str):
         msgs = store.peek_unconsumed(db_path, chat_id)
         if not msgs:
             continue
-        if not tmux.pane_alive(target):
+        if not mux.pane_alive(target):
             continue  # _process_tmux_prompts/_process_tmux_delivery already log+clear this
 
         for m in msgs:
@@ -751,10 +772,10 @@ def _process_mode_commands(db_path: str):
                 continue
             requested = match.group(1).lower()
             want = _MODE_ALIASES.get(requested, requested)
-            if want not in tmux._MODE_MARKERS:
-                reply = f"не знаю режим {requested!r} — есть {', '.join(tmux._MODE_MARKERS)}"
+            if want not in mux._MODE_MARKERS:
+                reply = f"не знаю режим {requested!r} — есть {', '.join(mux._MODE_MARKERS)}"
                 reached = None
-            elif is_permission_prompt(tmux.capture_pane(target)):
+            elif is_permission_prompt(mux.capture_pane(target)):
                 # Found live 2026-09-08: pressing Shift-Tab while a Y/N
                 # permission prompt is showing overwrites the status
                 # line with the prompt itself — cycle_to_mode's parser
@@ -769,7 +790,7 @@ def _process_mode_commands(db_path: str):
                 reached = None
             else:
                 try:
-                    reached = tmux.cycle_to_mode(target, want, max_presses=MODE_CYCLE_MAX_PRESSES)
+                    reached = mux.cycle_to_mode(target, want, max_presses=MODE_CYCLE_MAX_PRESSES)
                 except Exception:
                     log.exception("сессия %s: ошибка cycle_to_mode(%s)", session_id, want)
                     reached = None
@@ -813,8 +834,10 @@ def _process_tmux_delivery(db_path: str):
         if not msgs:
             continue
 
-        if not tmux.pane_alive(target):
-            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат", session_id, target)
+        target = _live_target(db_path, sess)
+        if target is None:
+            log.info("сессия %s: панель %s больше не существует, разоружаю и удаляю чат",
+                     session_id, sess["tmux_target"])
             _clear_pane_state(db_path, session_id, chat_id)
             continue
 
@@ -822,7 +845,7 @@ def _process_tmux_delivery(db_path: str):
         delivered_any = False
         for m in msgs:
             try:
-                tmux.send_keys(target, m["text"])
+                mux.send_keys(target, m["text"])
             except Exception:
                 log.exception("сессия %s: ошибка send-keys в %s", session_id, target)
                 break  # leave this and later messages unconsumed — retried next tick, in order
@@ -832,7 +855,7 @@ def _process_tmux_delivery(db_path: str):
 
         if delivered_any:
             try:
-                tmux.send_keys(target, _DELTA_CHAT_REMINDER_TAG)
+                mux.send_keys(target, _DELTA_CHAT_REMINDER_TAG)
             except Exception:
                 log.exception("сессия %s: не удалось отправить напоминание в %s", session_id, target)
         # Deliberately NOT resetting last_prompt_hash/last_limit_hash

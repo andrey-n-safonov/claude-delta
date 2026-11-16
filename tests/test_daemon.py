@@ -3,13 +3,13 @@ Plain-assert test (no pytest, see test_prompt_detect.py). Run with:
 
     .venv/bin/python3 tests/test_daemon.py
 
-Needs the venv, unlike test_store.py/test_tmux.py — daemon.py imports
+Needs the venv, unlike test_store.py/test_mux.py — daemon.py imports
 bridge.py at module level, which needs deltachat_rpc_client installed.
 
 Covers _parse_name_value_pairs (DELTA_SPAWN_BACKENDS/_FOLDERS parsing)
 and _split_folder_and_task — the pure, non-IO pieces of the 2026-09-14
 control-protocol addition worth locking down; everything else in that
-change touches Bridge/tmux/sqlite and is exercised live instead (see
+change touches Bridge/mux/sqlite and is exercised live instead (see
 design.md).
 """
 import pathlib

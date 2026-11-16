@@ -24,7 +24,7 @@ ls -la ~/.claude/commands/delta-chat.md 2>/dev/null
 ## 1. Предпосылки (проверь и сообщи, если чего-то нет)
 
 - `python3 --version` — нужен ≥ 3.11.
-- `which tmux sqlite3` — оба нужны (tmux — для диспетчера, sqlite3 — для
+- `which tmux sqlite3` — оба нужны (tmux или herdr — для диспетчера, см. `DELTA_MUX` в `daemon.env.example`; sqlite3 — для
   ручной диагностики drop-box). Имя **пакета** для установки зависит от
   дистрибутива и не всегда совпадает с именем бинарника — на Fedora
   пакет называется `sqlite`, бинарник всё равно `sqlite3` (на

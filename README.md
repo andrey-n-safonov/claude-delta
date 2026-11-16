@@ -22,7 +22,10 @@ Delta Chat выбран как транспорт вместо, например
 > демона: для сессий, зарегистрированных в tmux (`register-tmux`),
 > permission-промпты харнеста детектятся в панели и форвардятся в чат
 > автономно, ответы инжектятся обратно через `tmux send-keys` — без
-> `/loop`/`ScheduleWakeup` внутри сессии. Детект — структурный (курсор
+> `/loop`/`ScheduleWakeup` внутри сессии. С 2026-11-16 то же работает в
+> [herdr](https://herdr.dev) (`mux.py`: мультиплексор определяется по
+> панели, `register` вместо `register-tmux`, `DELTA_MUX` — где поднимать
+> сессии из `/new-session`). Детект — структурный (курсор
 > `❯` перед пронумерованной опцией у конца видимой панели), не завязан
 > на конкретную формулировку вопроса — калиброван на реальных захватах
 > живых панелей, см. `tests/fixtures/` и `docs/design.md` в vault.
@@ -109,12 +112,12 @@ account db.
 ```
 claude-delta create-session [--name NAME] [--message TEXT]  # -> chat_id, --message обязателен по факту:
                                                               # без первого сообщения группа не появится у собеседника
-claude-delta register-tmux [--target TARGET]  # включает tmux-диспетчер (форвардинг промптов), по умолчанию $TMUX_PANE
+claude-delta register [--target TARGET]       # включает диспетчер панели (форвардинг промптов), по умолчанию $HERDR_PANE_ID / $TMUX_PANE; алиас register-tmux
 claude-delta send <text>
 claude-delta send-file <путь> [подпись]       # см. ниже — файл из сессии в чат
 claude-delta rename <name>                    # переименовать групповой чат (текущая тема сессии)
 claude-delta set-mode <manual|accept-edits|plan|auto>  # переключить permission-режим панели
-claude-delta check                            # новые сообщения, JSON lines (не нужно для tmux-сессий — доставляет диспетчер)
+claude-delta check                            # новые сообщения, JSON lines (не нужно для сессий в панели — доставляет диспетчер)
 claude-delta close                            # уведомление + разоружение + чат в очередь на удаление
 claude-delta status                           # жив ли демон и армирована ли сессия здесь
 ```
