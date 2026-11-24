@@ -134,12 +134,15 @@ else
 fi
 cd ~/work/claude-delta
 
-# 4.2 Виртуальное окружение
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-deactivate
+# 4.2 Виртуальное окружение (uv; интерпретатор закреплён в .python-version
+# и качается uv'ом, а не берётся из системы: обновление Python в ОС
+# больше не ломает venv, как было на omni055 в ноябре 2026)
+uv sync
 ```
+
+Если venv после апгрейда ОС всё же сломан (`No module named claude_delta`) —
+`systemctl --user stop claude-delta-daemon && uv sync`, затем `start`.
+Версии зафиксированы в `uv.lock` (коммитится).
 
 Проверь, что `deltachat-rpc-server` встал как готовый бинарник (пакет
 тащит прекомпилированный wheel под linux x86_64/arm64) — если pip падает
